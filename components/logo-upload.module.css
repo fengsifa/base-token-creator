@@ -1,0 +1,3 @@
+.control { display:flex; align-items:center; gap:12px; padding:10px 0; }
+.input { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+.fileName { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

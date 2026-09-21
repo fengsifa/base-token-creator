@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: token_creator
+      POSTGRES_USER: token_creator
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - token_creator_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U token_creator -d token_creator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - token_creator_internal
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      DATABASE_URL: postgresql://token_creator:${POSTGRES_PASSWORD}@postgres:5432/token_creator
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - token_creator_uploads:/app/public/uploads
+    networks:
+      - token_creator_internal
+
+volumes:
+  token_creator_postgres_data:
+  token_creator_uploads:
+
+networks:
+  token_creator_internal:
+    driver: bridge
