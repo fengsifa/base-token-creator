@@ -31,6 +31,11 @@ import {
   type Stage,
 } from "../lib/creator-state";
 import { validateTokenInput } from "../lib/validation";
+import {
+  NO_WALLET_MESSAGE,
+  hasInjectedWallet,
+  onInjectedWalletAvailable,
+} from "../lib/wallet";
 
 type OnChainToken = {
   name: string;
@@ -139,8 +144,13 @@ export function CreatorForm() {
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    const injectedProvider = (window as unknown as { ethereum?: unknown }).ethereum;
-    setInjectedAvailable(Boolean(injectedProvider));
+    if (hasInjectedWallet()) {
+      setInjectedAvailable(true);
+      return;
+    }
+    setInjectedAvailable(false);
+    // Wallets can inject after load, so keep listening before giving up.
+    return onInjectedWalletAvailable(() => setInjectedAvailable(true));
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -355,9 +365,18 @@ export function CreatorForm() {
   // ---------------------------------------------------------------------------
 
   const connectWallet = () => {
+    // Re-check at click time: the wallet may have been installed or unlocked
+    // after this page rendered, and the state above would be stale.
+    if (!hasInjectedWallet()) {
+      setInjectedAvailable(false);
+      setError(NO_WALLET_MESSAGE);
+      return;
+    }
+    setInjectedAvailable(true);
+
     const preferred = connectors.find(connector => connector.type === "injected") ?? connectors[0];
     if (!preferred) {
-      setError("No browser wallet detected. Install MetaMask (or another EIP-1193 wallet).");
+      setError(NO_WALLET_MESSAGE);
       return;
     }
     connect(

@@ -12,6 +12,13 @@ import {
 } from "../lib/contracts";
 import { explorerAddressUrl, explorerTxUrl, shortAddress } from "../lib/creator-state";
 import { MIN_SERVICE_FEE_ETH } from "../lib/config";
+import {
+  NO_WALLET_MESSAGE,
+  WALLET_REQUIREMENT_HINT,
+  hasInjectedWallet,
+  onInjectedWalletAvailable,
+  type InjectedWalletState,
+} from "../lib/wallet";
 
 /**
  * One-click Factory deployment.
@@ -35,6 +42,21 @@ export function FactorySetup() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState("");
   const [configuredCodeOk, setConfiguredCodeOk] = useState<boolean | null>(null);
+  /**
+   * Starts as "unknown" rather than "absent": on the server there is no window,
+   * and assuming "absent" would flash a false warning on every load.
+   */
+  const [walletState, setWalletState] = useState<InjectedWalletState>("unknown");
+
+  useEffect(() => {
+    if (hasInjectedWallet()) {
+      setWalletState("present");
+      return;
+    }
+    setWalletState("absent");
+    // Wallets can inject after load, so keep listening before giving up.
+    return onInjectedWalletAvailable(() => setWalletState("present"));
+  }, []);
 
   const receipt = useWaitForTransactionReceipt({ hash, chainId: config.chainId });
   const deployedAddress = receipt.data?.contractAddress;
@@ -75,9 +97,19 @@ export function FactorySetup() {
   }, [config.networkKey, deployedAddress, address]);
 
   const connectWallet = () => {
+    // Re-check at click time: state may be stale if the wallet was installed or
+    // unlocked after this page rendered.
+    if (!hasInjectedWallet()) {
+      setWalletState("absent");
+      setError(NO_WALLET_MESSAGE);
+      return;
+    }
+    setWalletState("present");
+    setError("");
+
     const preferred = connectors.find(connector => connector.type === "injected") ?? connectors[0];
     if (!preferred) {
-      setError("No browser wallet detected. Install MetaMask (or another EIP-1193 wallet).");
+      setError(NO_WALLET_MESSAGE);
       return;
     }
     connect({ connector: preferred }, { onError: cause => setError(describeError(cause)) });
@@ -177,6 +209,15 @@ export function FactorySetup() {
           </div>
         )}
 
+        {walletState === "absent" && !isConnected && (
+          <div className="notice warning">
+            <strong>No browser wallet detected.</strong> {NO_WALLET_MESSAGE}{" "}
+            <a href="https://metamask.io/download/" target="_blank" rel="noreferrer">
+              <u>Get MetaMask →</u>
+            </a>
+          </div>
+        )}
+
         <div className="actions">
           {!isConnected ? (
             <button className="button" disabled={connecting} onClick={connectWallet}>
@@ -199,6 +240,12 @@ export function FactorySetup() {
             Back to token creator
           </Link>
         </div>
+
+        {!isConnected && (
+          <div className="helper" style={{ paddingLeft: 0 }}>
+            {WALLET_REQUIREMENT_HINT}
+          </div>
+        )}
 
         {isConnected && (
           <div className="helper" style={{ paddingLeft: 0 }}>

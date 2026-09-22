@@ -129,6 +129,18 @@ async function main() {
       "GET /setup offers the factory deployment",
       setup.html.includes("Deploy the Token Factory"),
     );
+    // The wallet requirement must be visible before anything is clicked, so a
+    // missing extension is never discovered as a raw library error.
+    record(
+      "GET /setup states the wallet requirement up front",
+      setup.html.includes("Requires a browser wallet extension such as MetaMask"),
+    );
+    // Server render has no window.ethereum, so the creator page must already
+    // explain the missing wallet rather than showing a bare connect button.
+    record(
+      "GET /creator explains the missing wallet instead of failing silently",
+      creator.html.includes("No browser wallet was found on this page"),
+    );
 
     const admin = await get("/admin");
     record("GET /admin returns 200", admin.status === 200, `status ${admin.status}`);

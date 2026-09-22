@@ -9,6 +9,7 @@
  */
 import type { Abi, Address, Hex } from "viem";
 import { BaseError, ContractFunctionRevertedError, UserRejectedRequestError } from "viem";
+import { isProviderNotFoundError, providerNotFoundMessage } from "./wallet";
 import artifact from "./tokenfactory-artifact.json";
 
 export const tokenFactoryAbi = [
@@ -107,6 +108,12 @@ const REVERT_MESSAGES: Record<string, string> = {
  * contract's own revert reason over the raw RPC stack.
  */
 export function describeError(error: unknown): string {
+  // Checked first: this one is not a viem BaseError, and the raw library text
+  // ("Provider not found.") does not tell the user what to actually do.
+  if (isProviderNotFoundError(error)) {
+    return providerNotFoundMessage();
+  }
+
   if (error instanceof BaseError) {
     if (error.walk(inner => inner instanceof UserRejectedRequestError)) {
       return "You rejected the request in your wallet. Nothing was sent on-chain.";

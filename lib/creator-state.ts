@@ -10,9 +10,9 @@
  * user-signed transaction. The two-step paid flow still works when a non-zero
  * fee is configured, so no existing deployment behaviour is removed.
  */
+import { NO_WALLET_MESSAGE } from "./wallet";
 
 export type Stage = "idle" | "paying" | "payment_confirmed" | "deploying" | "success";
-
 export type PrimaryActionKind =
   | "connect"
   | "switch-network"
@@ -139,7 +139,7 @@ export function deriveCreatorState(input: CreatorStateInput): CreatorState {
 
   const blockers: string[] = [];
   if (!input.hasConnector) {
-    blockers.push("No browser wallet detected. Install MetaMask (or another EIP-1193 wallet) to continue.");
+    blockers.push(NO_WALLET_MESSAGE);
   }
   if (!input.factoryAddress) {
     blockers.push(

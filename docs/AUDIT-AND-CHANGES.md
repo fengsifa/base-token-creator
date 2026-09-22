@@ -324,3 +324,47 @@ UI 那边那条带 `/setup` 链接的专用提示成为唯一入口，页面与�
 - `/setup`：`Deploy the Token Factory` 页面正常 ✅
 - `/admin`：`Admin sign-in` 正常 ✅
 - API：`decimals = 0` 通过校验（仅因未配 `DATABASE_URL` 返回 503 记录镜像告警）；`decimals = 19` / 空名称 / 非法钱包地址 / 零供应量均返回 400 ✅
+
+---
+
+## 第三次修正：`Provider not found` 报错
+
+**现象**：在 `/setup` 点 *Connect Wallet* 后显示 `Provider not found. Version: @wagmi/core@2.22.1`。
+
+**排查顺序与结论**
+
+1. **版本兼容性（排除）**：`wagmi@2.19.5` 官方声明的依赖就是 `@wagmi/core@2.22.1`，
+   `@wagmi/connectors@6.2.0` 的 peer 要求同样是 2.22.1。三者完全匹配，**不存在版本不兼容**。
+   （报错里的版本号是 **2.22.1**，不是 2.2.1。）
+2. **chain 配置（排除）**：`createConfig({ chains: [baseSepolia, base] })`，
+   `baseSepolia.id === 84532`，transport 也已为两个网络都配置。
+3. **Provider 注入（命中）**：`Provider not found` 是 wagmi 的 `ProviderNotFoundError`，
+   **只在 `window.ethereum` 不存在时抛出**。也就是说：那一次连接发生在**没有注入式钱包的浏览器环境**里
+   （典型场景：应用内的预览面板、手机 App 内置浏览器、或未装 MetaMask 的桌面浏览器）。
+
+**代码里真实存在的缺陷（已修）**
+
+`/creator` 页有 `window.ethereum` 检测：缺钱包时会禁用按钮并说明原因。
+但 **`/setup` 页没有这层检测**，于是把库的原始报错直接抛给了用户——这是不一致，也是本次要修的点。
+
+改动：
+
+- 新增 `lib/wallet.ts`：`hasInjectedWallet()`（SSR 安全）、`onInjectedWalletAvailable()`
+  （监听 `ethereum#initialized` 与 `eip6963:announceProvider`，覆盖"钱包晚于页面注入"的情况），
+  以及两条**互不混淆**的说明文案：
+  - `NO_WALLET_MESSAGE` —— 浏览器根本没有钱包扩展
+  - `PROVIDER_UNRESOLVED_MESSAGE` —— `window.ethereum` 存在但解析不出 provider（扩展锁着/冲突）
+- `describeError()` 现在优先识别这类错误并给出可操作文案，**不再把 `@wagmi/core@2.22.x` 这类库内部信息丢给用户**
+- `/setup` 页改为三态（`unknown` / `present` / `absent`）：
+  `unknown` 起步避免服务端误报；**点击时重新检测**（钱包可能刚装好或刚解锁）；
+  `absent` 时显式展示提示与 MetaMask 下载入口，并始终先展示"需要浏览器钱包扩展"的前置说明
+
+**没有做的事**：没有引入 Mock Provider，没有把错误吞掉，也没有伪造连接成功——
+真实连接路径原样保留，只是让失败原因说得清楚。
+
+**回归防护**：
+
+- `test/unit/wallet.test.ts`：覆盖两种状态的判定、按 name / 按 message 识别错误、
+  以及 `describeError()` **不得**再输出 `@wagmi/core` 原始文本
+- 冒烟测试新增两条：`/setup` 必须在前置说明里写明需要浏览器钱包扩展；
+  `/creator` 在服务端渲染（无 `window.ethereum`）时就必须说明缺钱包
