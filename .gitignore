@@ -5,3 +5,12 @@ node_modules
 *.log
 deploy-tokenbuild.tar.gz
 backups
+
+# Hardhat
+artifacts
+cache
+dist-hardhat
+typechain-types
+coverage
+coverage.json
+*.tsbuildinfo

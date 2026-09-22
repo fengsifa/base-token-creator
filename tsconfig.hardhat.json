@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "outDir": "dist-hardhat",
+    "types": ["node", "mocha", "chai"]
+  },
+  "include": [
+    "hardhat.config.ts",
+    "test/contract/**/*.ts",
+    "scripts/deploy-factory.ts",
+    "lib/**/*.ts"
+  ]
+}

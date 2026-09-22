@@ -6,3 +6,11 @@ node_modules
 backups
 *.log
 
+# Contract toolchain output: not needed to build the app, and it would only
+# slow the build context down. The browser artifact lives in lib/.
+artifacts
+cache
+dist-hardhat
+typechain-types
+coverage
+

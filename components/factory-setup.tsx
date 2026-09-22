@@ -1,0 +1,279 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import { useAccount, useChainId, useConnect, useDeployContract, usePublicClient, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
+import { useAppConfig } from "../lib/app-config-context";
+import {
+  describeError,
+  factoryArtifactReady,
+  tokenFactoryAbi,
+  tokenFactoryBytecode,
+} from "../lib/contracts";
+import { explorerAddressUrl, explorerTxUrl, shortAddress } from "../lib/creator-state";
+import { MIN_SERVICE_FEE_ETH } from "../lib/config";
+
+/**
+ * One-click Factory deployment.
+ *
+ * The Factory is a stateless public contract with no owner, so deploying it is a
+ * permissionless operation that anybody can perform from their own wallet. Doing
+ * it here means the operator never has to share a private key or run a CLI.
+ *
+ * The address shown afterwards comes from the mined receipt (`contractAddress`),
+ * not from a locally predicted value.
+ */
+export function FactorySetup() {
+  const config = useAppConfig();
+  const { address, isConnected } = useAccount();
+  const chainId = useChainId();
+  const { connect, connectors, isPending: connecting } = useConnect();
+  const { switchChain, isPending: switching } = useSwitchChain();
+  const publicClient = usePublicClient({ chainId: config.chainId });
+  const { deployContractAsync, isPending: deploying } = useDeployContract();
+  const [hash, setHash] = useState<`0x${string}`>();
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState("");
+  const [configuredCodeOk, setConfiguredCodeOk] = useState<boolean | null>(null);
+
+  const receipt = useWaitForTransactionReceipt({ hash, chainId: config.chainId });
+  const deployedAddress = receipt.data?.contractAddress;
+  const wrongNetwork = isConnected && chainId !== undefined && chainId !== config.chainId;
+
+  useEffect(() => {
+    let cancelled = false;
+    setConfiguredCodeOk(null);
+    if (!publicClient || !config.factoryAddress) return;
+
+    publicClient
+      .getBytecode({ address: config.factoryAddress })
+      .then(code => {
+        if (!cancelled) setConfiguredCodeOk(Boolean(code && code !== "0x"));
+      })
+      .catch(() => {
+        if (!cancelled) setConfiguredCodeOk(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [publicClient, config.factoryAddress]);
+
+  const envSnippet = useMemo(() => {
+    const networkSuffix = config.networkKey === "mainnet" ? "MAINNET" : "SEPOLIA";
+    const lines = [
+      `NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_${networkSuffix}=${deployedAddress ?? "<factory address>"}`,
+      "",
+      "# Free mode (default): no service fee, one transaction.",
+      `NEXT_PUBLIC_TOKEN_CREATOR_FEE_${networkSuffix}=0`,
+      "",
+      "# Lowest-fee mode: uncomment both lines and paste YOUR wallet address.",
+      `# NEXT_PUBLIC_TOKEN_CREATOR_FEE_${networkSuffix}=${MIN_SERVICE_FEE_ETH}`,
+      `# NEXT_PUBLIC_TOKEN_CREATOR_FEE_RECIPIENT_${networkSuffix}=${address ?? "<your wallet address>"}`,
+    ];
+    return lines.join("\n");
+  }, [config.networkKey, deployedAddress, address]);
+
+  const connectWallet = () => {
+    const preferred = connectors.find(connector => connector.type === "injected") ?? connectors[0];
+    if (!preferred) {
+      setError("No browser wallet detected. Install MetaMask (or another EIP-1193 wallet).");
+      return;
+    }
+    connect({ connector: preferred }, { onError: cause => setError(describeError(cause)) });
+  };
+
+  const deploy = async () => {
+    setError("");
+    if (!factoryArtifactReady) {
+      setError("The compiled factory bytecode is missing. Run `npm run contracts:build` first.");
+      return;
+    }
+    try {
+      const txHash = await deployContractAsync({
+        abi: tokenFactoryAbi,
+        bytecode: tokenFactoryBytecode,
+        chainId: config.chainId,
+      });
+      setHash(txHash);
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  };
+
+  const copy = async (value: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(key);
+      window.setTimeout(() => setCopied(""), 2000);
+    } catch {
+      setError("Clipboard access was blocked by the browser. Select and copy the value manually.");
+    }
+  };
+
+  return (
+    <main className="shell">
+      <nav className="nav">
+        <Link href="/" className="brand">
+          <span className="mark">T</span> Tokenbase
+        </Link>
+        <span className="eyebrow">Operator setup</span>
+      </nav>
+
+      <section className="panel" style={{ maxWidth: 860, margin: "0 auto", padding: 32 }}>
+        <div className="eyebrow">One-time step</div>
+        <h2>Deploy the Token Factory</h2>
+        <p>
+          The factory is the contract that creates your tokens. It is stateless and ownerless: it
+          holds no funds, has no admin functions and cannot be upgraded, so deploying it grants you
+          no special powers afterwards. Anyone can deploy it; you just pay the one-off gas.
+        </p>
+        <p className="muted">
+          Network: <strong>{config.chainName}</strong> (chain id {config.chainId}) · Contract:{" "}
+          <span className="mono">contracts/TokenFactory.sol</span>
+        </p>
+
+        <div className="mini-row">
+          <span className="muted">Currently configured factory</span>
+          <span className="mono">{config.factoryAddress || "— not configured —"}</span>
+        </div>
+        {config.factoryAddress && (
+          <div className="mini-row">
+            <span className="muted">Code found at that address</span>
+            <strong>
+              {configuredCodeOk === null ? "checking…" : configuredCodeOk ? "yes" : "NO — address looks wrong"}
+            </strong>
+          </div>
+        )}
+
+        {!factoryArtifactReady && (
+          <div className="error" style={{ marginTop: 14 }}>
+            Compiled factory bytecode is missing from this build, so the factory cannot be deployed
+            from the browser. Run <span className="mono">npm run contracts:build</span> and redeploy.
+          </div>
+        )}
+
+        {wrongNetwork && (
+          <div className="notice warning">
+            Switch your wallet to {config.chainName} first.{" "}
+            <button
+              className="button"
+              disabled={switching}
+              onClick={() =>
+                switchChain(
+                  { chainId: config.chainId },
+                  { onError: cause => setError(describeError(cause)) },
+                )
+              }
+            >
+              {switching ? "Switching…" : `Switch to ${config.chainName}`}
+            </button>
+          </div>
+        )}
+
+        {error && (
+          <div className="error" style={{ marginTop: 14 }}>
+            {error}
+          </div>
+        )}
+
+        <div className="actions">
+          {!isConnected ? (
+            <button className="button" disabled={connecting} onClick={connectWallet}>
+              {connecting ? "Connecting…" : "Connect Wallet"}
+            </button>
+          ) : (
+            <button
+              className="button"
+              disabled={deploying || receipt.isLoading || wrongNetwork || !factoryArtifactReady}
+              onClick={() => void deploy()}
+            >
+              {deploying
+                ? "Confirm in your wallet…"
+                : receipt.isLoading
+                  ? "Waiting for confirmation…"
+                  : "Deploy TokenFactory"}
+            </button>
+          )}
+          <Link href="/creator" className="button secondary">
+            Back to token creator
+          </Link>
+        </div>
+
+        {isConnected && (
+          <div className="helper" style={{ paddingLeft: 0 }}>
+            Connected as <span className="mono">{shortAddress(address ?? "")}</span>
+          </div>
+        )}
+
+        {hash && (
+          <div className="status">
+            <strong>Deployment transaction</strong>
+            <div className="mono">
+              <a href={explorerTxUrl(config.explorerBase, hash)} target="_blank" rel="noreferrer">
+                {hash}
+              </a>
+            </div>
+            <span className="muted">
+              {receipt.isLoading
+                ? "Waiting to be mined…"
+                : receipt.isSuccess
+                  ? "Mined."
+                  : receipt.isError
+                    ? "The transaction failed on-chain."
+                    : "Submitted."}
+            </span>
+          </div>
+        )}
+
+        {deployedAddress && (
+          <div className="status">
+            <strong style={{ color: "var(--success)" }}>Factory deployed</strong>
+            <div className="mono" style={{ marginTop: 8, wordBreak: "break-all" }}>
+              {deployedAddress}
+            </div>
+            <div className="actions">
+              <button className="button secondary" onClick={() => void copy(deployedAddress, "factory")}>
+                {copied === "factory" ? "Copied" : "Copy address"}
+              </button>
+              <a
+                className="button secondary"
+                href={explorerAddressUrl(config.explorerBase, deployedAddress)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                View on BaseScan
+              </a>
+            </div>
+
+            <p style={{ marginTop: 18 }}>
+              Add this to the server environment file, then restart the app container:
+            </p>
+            <pre
+              className="mono"
+              style={{
+                background: "var(--soft-blue)",
+                padding: 14,
+                borderRadius: 12,
+                overflowX: "auto",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {envSnippet}
+            </pre>
+            <div className="actions">
+              <button className="button secondary" onClick={() => void copy(envSnippet, "env")}>
+                {copied === "env" ? "Copied" : "Copy env block"}
+              </button>
+            </div>
+            <p className="muted">
+              If you enable the fee, the recipient should normally be your own wallet — which is{" "}
+              <span className="mono">{address ?? "connected wallet"}</span>. Nothing is charged until
+              you set a fee.
+            </p>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
