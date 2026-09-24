@@ -146,6 +146,48 @@ async function main() {
     record("GET /admin returns 200", admin.status === 200, `status ${admin.status}`);
     record("GET /admin asks for the admin secret", admin.html.includes("Admin sign-in"));
 
+    // ---- network configuration reaches the browser intact -----------------
+    // The chain settings the wallet is asked to use come from these values, so
+    // the server must ship Base Sepolia unchanged. Both the rendered markup and
+    // the RSC payload are searched, because the payload is what the client
+    // provider actually reads.
+    const bothPages = creator.html + setup.html;
+    record(
+      "the served config carries chain id 84532",
+      /\\?"chainId\\?":\s*84532/.test(bothPages),
+    );
+    record(
+      "the served config carries the Base Sepolia RPC",
+      /\\?"rpcUrl\\?":\s*\\?"https:\/\/sepolia\.base\.org\\?"/.test(bothPages),
+      "https://sepolia.base.org",
+    );
+    record(
+      "the served config carries the BaseScan explorer",
+      /\\?"explorerBase\\?":\s*\\?"https:\/\/sepolia\.basescan\.org\\?"/.test(bothPages),
+      "https://sepolia.basescan.org",
+    );
+    // React inserts `<!-- -->` between adjacent server-rendered text nodes to keep
+    // hydration honest, so "chain id 84532" arrives split across a comment.
+    record(
+      "GET /setup names the configured network",
+      /chain id (?:<!-- -->)?84532/.test(setup.html),
+    );
+
+    // A normal user must never be handed a network form to fill in: the wallet
+    // API receives the RPC, chain id and explorer from this app instead.
+    const manualNetworkField =
+      /<input[^>]*(name|id|placeholder)\s*=\s*["'][^"']*(rpc|chain[_-]?id|explorer)[^"']*["'][^>]*>/i.test(
+        bothPages,
+      );
+    record(
+      "neither page asks the user to type an RPC URL or chain id",
+      !manualNetworkField,
+    );
+    record(
+      "the manual-network instructions are absent",
+      !/(enter|paste|add)\s+(your\s+)?(custom\s+)?rpc/i.test(bothPages),
+    );
+
     // ---- creation API validation ----------------------------------------
     const zeroDecimals = await postJson("/api/creations", {
       wallet_address: VALID_ADDRESS,

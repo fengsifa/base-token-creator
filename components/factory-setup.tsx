@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAccount, useChainId, useConnect, useDeployContract, usePublicClient, useSwitchChain, useWaitForTransactionReceipt } from "wagmi";
 import { useAppConfig } from "../lib/app-config-context";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../lib/contracts";
 import { explorerAddressUrl, explorerTxUrl, shortAddress } from "../lib/creator-state";
 import { MIN_SERVICE_FEE_ETH } from "../lib/config";
+import { ensureTargetChain, wrongNetworkMessage } from "../lib/network";
 import {
   NO_WALLET_MESSAGE,
   WALLET_REQUIREMENT_HINT,
@@ -32,10 +33,10 @@ import {
  */
 export function FactorySetup() {
   const config = useAppConfig();
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, connector } = useAccount();
   const chainId = useChainId();
   const { connect, connectors, isPending: connecting } = useConnect();
-  const { switchChain, isPending: switching } = useSwitchChain();
+  const { switchChainAsync, isPending: switching } = useSwitchChain();
   const publicClient = usePublicClient({ chainId: config.chainId });
   const { deployContractAsync, isPending: deploying } = useDeployContract();
   const [hash, setHash] = useState<`0x${string}`>();
@@ -61,6 +62,47 @@ export function FactorySetup() {
   const receipt = useWaitForTransactionReceipt({ hash, chainId: config.chainId });
   const deployedAddress = receipt.data?.contractAddress;
   const wrongNetwork = isConnected && chainId !== undefined && chainId !== config.chainId;
+
+  const networkConfig = useMemo(
+    () => ({
+      chainId: config.chainId,
+      chainName: config.chainName,
+      rpcUrl: config.rpcUrl,
+      explorerBase: config.explorerBase,
+    }),
+    [config.chainId, config.chainName, config.rpcUrl, config.explorerBase],
+  );
+
+  /**
+   * Move the wallet to the configured network without ever asking the user for
+   * an RPC URL, a chain id or an explorer: the wallet is handed ours and adds the
+   * network itself when it does not have it.
+   */
+  const switchToTargetChain = useCallback(async () => {
+    setError("");
+    try {
+      await ensureTargetChain({
+        config: networkConfig,
+        switchChainAsync,
+        getProvider: connector ? () => connector.getProvider() : undefined,
+      });
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  }, [networkConfig, connector, switchChainAsync]);
+
+  /** Prompt once per connection rather than making the user find a button. */
+  const autoSwitchFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isConnected) {
+      autoSwitchFor.current = null;
+      return;
+    }
+    if (!address || !wrongNetwork) return;
+    if (autoSwitchFor.current === address) return;
+    autoSwitchFor.current = address;
+    void switchToTargetChain();
+  }, [isConnected, address, wrongNetwork, switchToTargetChain]);
 
   useEffect(() => {
     let cancelled = false;
@@ -187,19 +229,14 @@ export function FactorySetup() {
 
         {wrongNetwork && (
           <div className="notice warning">
-            Switch your wallet to {config.chainName} first.{" "}
-            <button
-              className="button"
-              disabled={switching}
-              onClick={() =>
-                switchChain(
-                  { chainId: config.chainId },
-                  { onError: cause => setError(describeError(cause)) },
-                )
-              }
-            >
+            {wrongNetworkMessage(chainId, config.chainName)}{" "}
+            <button className="button" disabled={switching} onClick={() => void switchToTargetChain()}>
               {switching ? "Switching…" : `Switch to ${config.chainName}`}
             </button>
+            <div className="helper" style={{ paddingLeft: 0, marginTop: 8 }}>
+              If your wallet does not have {config.chainName} yet, it will offer to add it — the
+              RPC, chain id and explorer are supplied for you, so there is nothing to type in.
+            </div>
           </div>
         )}
 

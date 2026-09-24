@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
 import { decodeEventLog, isAddress } from "viem";
 import {
@@ -20,6 +20,7 @@ import { LogoUpload } from "./logo-upload";
 import { useAppConfig } from "../lib/app-config-context";
 import { feeToWei } from "../lib/config";
 import { describeError, erc20ReadAbi, tokenFactoryAbi } from "../lib/contracts";
+import { ensureTargetChain, wrongNetworkMessage } from "../lib/network";
 import {
   deriveCreatorState,
   explorerAddressUrl,
@@ -79,11 +80,11 @@ export function CreatorForm() {
   const [factoryCodeOk, setFactoryCodeOk] = useState<boolean | null>(null);
   const [copied, setCopied] = useState("");
 
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, connector } = useAccount();
   const chainId = useChainId();
   const { connect, connectors, isPending: connecting } = useConnect();
   const { disconnect } = useDisconnect();
-  const { switchChain, isPending: switching } = useSwitchChain();
+  const { switchChainAsync, isPending: switching } = useSwitchChain();
   // Balance is read on the *target* chain so "you have 0 ETH on Base Sepolia"
   // is accurate even while the wallet is still pointed at another network.
   const { data: balance } = useBalance({ address, chainId: config.chainId });
@@ -135,6 +136,58 @@ export function CreatorForm() {
       stage,
     ],
   );
+
+  // ---------------------------------------------------------------------------
+  // Network
+  // ---------------------------------------------------------------------------
+
+  const networkConfig = useMemo(
+    () => ({
+      chainId: config.chainId,
+      chainName: config.chainName,
+      rpcUrl: config.rpcUrl,
+      explorerBase: config.explorerBase,
+    }),
+    [config.chainId, config.chainName, config.rpcUrl, config.explorerBase],
+  );
+
+  /**
+   * Ask the wallet to move to the configured network.
+   *
+   * The wallet is handed our own RPC URL, chain name, native currency and
+   * explorer, and it adds the network itself when it does not know it yet. The
+   * user never sees a form asking for any of that.
+   */
+  const switchToTargetChain = useCallback(async () => {
+    setError("");
+    try {
+      await ensureTargetChain({
+        config: networkConfig,
+        switchChainAsync,
+        getProvider: connector ? () => connector.getProvider() : undefined,
+      });
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  }, [networkConfig, connector, switchChainAsync]);
+
+  /**
+   * Prompt the switch once as soon as the wallet is connected on the wrong
+   * network, instead of making the user hunt for a button. Guarded per account so
+   * it fires once, and cleared on disconnect so a reconnect can prompt again. A
+   * refusal is respected: the notice and its button stay available.
+   */
+  const autoSwitchFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isConnected) {
+      autoSwitchFor.current = null;
+      return;
+    }
+    if (!address || !state.wrongNetwork) return;
+    if (autoSwitchFor.current === address) return;
+    autoSwitchFor.current = address;
+    void switchToTargetChain();
+  }, [isConnected, address, state.wrongNetwork, switchToTargetChain]);
 
   /** The address is configured but has no bytecode on this chain. */
   const factoryCodeMissing = Boolean(config.factoryAddress) && factoryCodeOk === false;
@@ -471,10 +524,7 @@ export function CreatorForm() {
         connectWallet();
         return;
       case "switch-network":
-        switchChain(
-          { chainId: config.chainId },
-          { onError: cause => setError(describeError(cause)) },
-        );
+        void switchToTargetChain();
         return;
       case "pay":
         void pay();
@@ -747,19 +797,14 @@ export function CreatorForm() {
 
           {state.wrongNetwork && (
             <div className="notice warning">
-              Your wallet is on the wrong network. Switch to {config.chainName} to continue.{" "}
-              <button
-                className="button"
-                disabled={switching}
-                onClick={() =>
-                  switchChain(
-                    { chainId: config.chainId },
-                    { onError: cause => setError(describeError(cause)) },
-                  )
-                }
-              >
+              {wrongNetworkMessage(chainId, config.chainName)}{" "}
+              <button className="button" disabled={switching} onClick={() => void switchToTargetChain()}>
                 {switching ? "Switching…" : `Switch to ${config.chainName}`}
               </button>
+              <div className="helper" style={{ paddingLeft: 0, marginTop: 8 }}>
+                If your wallet does not have {config.chainName} yet, it will offer to add it — the
+                RPC, chain id and explorer are supplied for you, so there is nothing to type in.
+              </div>
             </div>
           )}
 

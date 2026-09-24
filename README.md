@@ -135,7 +135,23 @@ The same page shows the deploying wallet address, which is a sensible choice for
   and a recipient address is mandatory. Values below `0.0001` are raised to
   `0.0001`, because a dust fee costs the user an extra transaction for nothing.
 
-## 4. Run
+## 4. Network handling
+
+A user never types an RPC URL, a chain id or an explorer URL. On connect the app
+asks the wallet to move to the configured network, handing over the RPC from
+`NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL` (or the default `https://sepolia.base.org`),
+`ETH` as the native currency and `https://sepolia.basescan.org` as the explorer.
+If the wallet does not know Base Sepolia yet, it is asked to add it with those
+same values. If the user refuses, the switch stays available as a button rather
+than dead-ending.
+
+wagmi only performs the add step when a wallet reports the specific error code
+`4902`, and wallets differ on how they report an unknown chain, so `lib/network.ts`
+detects the wider set of shapes and performs the add itself as a fallback. A user
+rejection (`4001`) is never mistaken for a missing chain — that would fire an
+unwanted second prompt.
+
+## 5. Run
 
 ```bash
 npm install
@@ -175,6 +191,18 @@ npm run build            # production build
 npm run test:smoke       # pages boot with no wallet and no database
 ```
 
+To check a factory that is already on a live chain (read-only — it signs nothing
+and sends nothing):
+
+```bash
+node scripts/verify-live-factory.mjs <factory address> [rpc url]
+```
+
+It confirms that code exists at the address, that the runtime bytecode is exactly
+what this repository compiles, that `MAX_DECIMALS` is 18, that no privileged
+function is present, that `createToken` simulates successfully at 0, 6 and 18
+decimals, and that invalid input is refused.
+
 `npm test` runs the unit, contract and integration suites in order.
 
 The integration suite starts its own Hardhat node, so it needs no testnet
@@ -184,7 +212,10 @@ Base Sepolia on its own.
 ## Manual end-to-end check on Base Sepolia
 
 1. Open the site and click *Connect Wallet*; approve MetaMask.
-2. If MetaMask is on the wrong network, click *Switch to Base Sepolia*.
+2. The app asks MetaMask to switch to Base Sepolia on its own. If MetaMask does
+   not have the network yet it offers to add it — the RPC, chain id, currency and
+   explorer are supplied by the app. Once you accept, the button becomes
+   *Create Token* with no further steps.
 3. Confirm the wallet holds test ETH (a faucet is linked on the page).
 4. Enter name, symbol, decimals and supply. The panel under the fields shows the
    exact base-unit amount that will be minted, so decimal mistakes are visible

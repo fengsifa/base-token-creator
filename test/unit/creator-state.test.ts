@@ -82,6 +82,35 @@ describe("deriveCreatorState", () => {
       expect(state.primaryActionKind).toBe("deploy");
       expect(state.primaryLabel).toBe("Create Token");
     });
+
+    it("returns to Create Token once the user confirms the switch", () => {
+      // The wallet is still on another chain: the only action is to switch.
+      const before = deriveCreatorState(input({ isConnected: true, chainId: 8453 }));
+      expect(before.primaryActionKind).toBe("switch-network");
+
+      // The user accepted in their wallet and chainId now reports 84532. Nothing
+      // else changes, and the state must settle straight back onto Create Token.
+      const after = deriveCreatorState(input({ isConnected: true, chainId: 84532 }));
+      expect(after.primaryActionKind).toBe("deploy");
+      expect(after.primaryLabel).toBe("Create Token");
+      expect(after.wrongNetwork).toBe(false);
+      expect(after.primaryDisabled).toBe(false);
+    });
+
+    it("keeps the switch available after a refusal instead of dead-ending", () => {
+      // A rejected switch leaves the wallet on the old chain: the action must
+      // still be offered so the user can try again.
+      const state = deriveCreatorState(input({ isConnected: true, chainId: 8453, switching: false }));
+      expect(state.primaryActionKind).toBe("switch-network");
+      expect(state.primaryDisabled).toBe(false);
+    });
+
+    it("needs no manual network configuration in the free path", () => {
+      // Nothing about chain ids or RPC URLs is a blocker in its own right; the
+      // switch is an action, never a field the user must fill in.
+      const state = deriveCreatorState(input({ isConnected: true, chainId: 84532 }));
+      expect(state.blockers.join(" ")).not.toMatch(/rpc|chain id|add the network/i);
+    });
   });
 
   describe("fee modes", () => {

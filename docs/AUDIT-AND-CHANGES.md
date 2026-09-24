@@ -210,12 +210,58 @@ docker compose up -d app
 
 ## H. Factory 合约是否已部署
 
-**未部署。** 依据：全仓库检索 40 位十六进制地址**零命中**，`.env.example` 中三个工厂地址变量全为空，且原仓库根本没有任何编译/部署工具链。
+**已部署（由操作者用本人钱包完成）。**
 
-我没有、也不会编造地址，也不会使用你的钱包部署。已提供两条真实可用的部署路径：
+审计阶段的状态是**未部署**：全仓库检索 40 位十六进制地址零命中，`.env.example` 中三个工厂地址变量全为空，
+且原仓库根本没有任何编译/部署工具链。我没有编造地址，也没有使用操作者的钱包代为部署。
 
-1. **浏览器内（推荐，无需私钥/CLI）**：打开 https://openrelays.com/setup → 连接 MetaMask → 切到 Base Sepolia → 点 *Deploy TokenFactory* → 复制打印出的地址与环境变量片段。地址取自**已挖出收据的 `contractAddress`**，不是本地预测值。
-2. **命令行（可选）**：`npm run contracts:build && npm run deploy:factory`，需在 `.env.local` 里放 `DEPLOYER_PRIVATE_KEY`。含主网二次确认保护。
+随后操作者通过 `/setup` 页面用本人 MetaMask 完成了部署。可验证信息如下：
+
+| 项目 | 值 |
+| --- | --- |
+| 合约地址 | `0xf7606511ac1e18224a21d851b1cfa7258d3ac684` |
+| 部署交易 | `0x7c02fd6633d17047837ca89da2f7b7b2702857d392dc05a91a70775a55ec7db6` |
+| 区块高度 | 47148470 |
+| 部署者 | `0x75CBA94CDa95866a5294CDFf66C96d8a8B2663EA`（操作者钱包） |
+| 收据状态 | `0x1`（成功） |
+| gasUsed | 986,945 |
+| 实际 gas 价格 | 5,940,000 wei |
+| 运行时字节码 | 4,333 字节（EIP-170 上限 24,576） |
+
+**地址来源可验证**：不是本地预测值，而是取自链上已挖出收据的 `contractAddress`，
+且与 `/setup` 页面显示的地址一致。
+
+**独立核验**（`node scripts/verify-live-factory.mjs 0xf7606511ac1e18224a21d851b1cfa7258d3ac684`，
+只读，不签名、不发交易）：
+
+```
+PASS  contract code exists  (4333 bytes)
+PASS  runtime bytecode matches the compiled artifact
+PASS  MAX_DECIMALS == 18
+PASS  ABI exposes no privileged function
+PASS  createToken simulates (18 decimals / 0 decimals / 6 decimals)
+PASS  contract rejects decimals 19 / empty name / zero supply
+```
+
+"运行时字节码与编译产物完全一致"这一条说明链上的就是本仓库 `contracts/TokenFactory.sol` 的产物，
+不是另一个同名合约；`createToken` 三种精度均模拟成功，说明工厂现在**确实可以创建 Token**。
+
+### 部署成本实测（Base Sepolia）
+
+用只读 RPC 实测，可与上表互相印证：
+
+| 项目 | 数值 |
+| --- | --- |
+| `eth_estimateGas` | 995,945 gas |
+| 实际 gasUsed | 986,945 gas（**估算误差 0.9%**） |
+| gas 价格 | 0.006 gwei |
+| L2 执行费 | 0.00000598 ETH |
+| L1 数据费（链上 `GasPriceOracle.getL1Fee` 精确值） | 0.00000015 ETH |
+| **合计** | **≈ 0.00000612 ETH** |
+
+> 我最初按"每 L1 字节 16 gas @ 1 gwei"手算 L1 上界得 0.00007035 ETH，**比实测高约 480 倍**。
+> Base 的 L1 费受压缩与 scalar 影响，手算上界毫无意义——要精确值就直接问链上的 `GasPriceOracle`
+> （`0x4200…000F`，selector `0x49948e0e`）。
 
 ---
 
@@ -239,35 +285,46 @@ docker compose exec -T postgres psql -U token_creator -d token_creator < migrati
 npm run contracts:build   # 编译合约并刷新浏览器用 artifact
 npm run typecheck
 npm run lint
-npm run test:unit         # 101 个纯逻辑用例
+npm run test:unit         # 152 个纯逻辑用例
 npm run test:contract     # 24 个合约用例
 npm run test:integration  # 17 个端到端用例（自建本地节点，不消耗测试网资金）
 npm run build
-npm run test:smoke
+npm run test:smoke        # 25 项构建产物与接口检查
+
+# 只读核验一个已部署的工厂（不签名、不发交易）
+node scripts/verify-live-factory.mjs 0xf7606511ac1e18224a21d851b1cfa7258d3ac684
 ```
 
 ---
 
 ## J. Base Sepolia 测试步骤
 
-1. 打开 https://openrelays.com/setup，连接 MetaMask，切到 Base Sepolia，部署工厂，复制地址。
-2. 把地址写进 `.env.local` 的 `NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA`，然后 `docker compose up -d app`。
-3. 打开 https://openrelays.com/creator，点 *Connect Wallet*。
-4. 钱包若在其他网络，点 *Switch to Base Sepolia*。
-5. 确认钱包有测试 ETH（页面会显示 Base Sepolia 上的余额，不足会明确提示）。
-6. 填入 Name / Symbol / Decimals / Supply。注意输入框下方会实时显示将要铸造的 base units 总数。
-7. 点 *Create Token*（免费模式下这是**唯一**一笔交易），在 MetaMask 中确认。
-8. 等待收据。页面随后显示从 `TokenCreated` 事件解析出的代币地址，以及从链上读回的 `name/symbol/decimals/totalSupply/你持有的余额`。
-9. 点 *View on BaseScan* 核对代币存在且参数与输入一致。
+工厂**已部署并配置完成**（见 H 节），因此现在只剩用户侧流程：
+
+1. 打开 https://openrelays.com/creator，点 *Connect Wallet*，在 MetaMask 中确认。
+2. 页面会**自动**询问切换到 Base Sepolia。若你的钱包还没有这个网络，钱包会提示添加——
+   **RPC、Chain ID、币种、区块浏览器全部由应用提供，不需要你输入任何东西**。
+   若你拒绝了，页面会显示当前所在链并提供重试按钮。
+3. 切换完成后不需要任何额外操作，主按钮即变为 *Create Token*。
+4. 确认钱包有测试 ETH（页面会显示 Base Sepolia 上的余额，不足会明确提示）。
+5. 填入 Name / Symbol / Decimals / Supply。注意输入框下方会实时显示将要铸造的 base units 总数。
+6. 点 *Create Token*（免费模式下这是**唯一**一笔交易），在 MetaMask 中确认。
+7. 等待收据。页面随后显示从 `TokenCreated` 事件解析出的代币地址，以及从链上读回的
+   `name/symbol/decimals/totalSupply/你持有的余额`。
+8. 点 *View on BaseScan* 核对代币存在且参数与输入一致。
+
+> 重新部署工厂（一般不需要）：打开 `/setup`，连接钱包，点 *Deploy TokenFactory*。
+> 该合约无 owner、无手续费、不可升级，重复部署只会多花一次 gas。
 
 ---
 
 ## K. 下一步需要你操作的事项
 
-1. **部署工厂**（唯一阻塞项）：走上面的 `/setup` 页面；或把地址告诉我，我写进部署环境变量并重启容器。
-2. **手续费模式已配置为最低档**：`0.0001 ETH`（两笔交易：先付费、再部署），收款地址已设为你的钱包。
-   若要改回免费模式（单笔交易、0 手续费），把 `NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA` 设为 `0` 并重启容器即可，**不需要重建镜像**。
-3. **改动已提交并推送到 GitHub**，见仓库提交历史。
+1. ~~部署工厂~~ **已完成**，地址已写入部署环境变量并上线。
+2. **手续费当前为免费模式**（`NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA=0`），单笔交易、只付 gas。
+   收款地址仍保留在配置里但免费模式下不参与流程，**想恢复收费改一个值即可，不需要重建镜像**。
+3. **本地还有 1 个提交未推送**（`fix: explain a missing browser wallet …`）。
+   远程 `main` 停在 `93b0bfb`；线上部署不受影响。你说推我再推。
 
 ---
 
@@ -368,3 +425,96 @@ UI 那边那条带 `/setup` 链接的专用提示成为唯一入口，页面与�
   以及 `describeError()` **不得**再输出 `@wagmi/core` 原始文本
 - 冒烟测试新增两条：`/setup` 必须在前置说明里写明需要浏览器钱包扩展；
   `/creator` 在服务端渲染（无 `window.ethereum`）时就必须说明缺钱包
+
+---
+
+## 第四次修正：钱包网络流程（以普通用户体验为准）
+
+**需求**：普通用户不应该手动填写 Base Sepolia 的 RPC、Chain ID 和区块浏览器。
+逐条核对结果与改动如下。
+
+### 逐条核对
+
+| # | 需求 | 审计结论 | 处理 |
+| --- | --- | --- | --- |
+| 1 | 连接后自动检测 Chain ID | **已满足** | `useChainId()`；`undefined`（未 hydrate）时不误判为错误网络，避免首屏闪错误横幅 |
+| 2 | 非 84532 时通过钱包 API 请求切换 | **已满足但不够健壮** | 原有 `switchChain({chainId})`；现改为经统一入口，并把**我们的** RPC/币种/浏览器交给钱包 |
+| 3 | 钱包没有该网络时请求添加 | **依赖库的隐式行为，有缺口** | 见下方"发现的问题 1" |
+| 4 | 确认后自动回到 Create Token | **已满足** | 状态由 `chainId` 派生，切换成功后横幅自动消失、主按钮回到 *Create Token*；另新增**连接后自动询问一次**，省掉找按钮 |
+| 5 | 不要求手动配置 RPC | **已满足** | 全站无任何 RPC/Chain ID 输入框；新增冒烟断言守住这条 |
+| 6 | 保留 84532 / sepolia.base.org / ETH | **已满足，且现已显式传给钱包** | 见下方"发现的问题 2" |
+
+### 发现的问题 1：自动添加网络依赖库的内部实现，覆盖不全
+
+`wallet_addEthereumChain` 确实会被调用，但**是 wagmi 的 injected connector 内部在做的**，
+触发条件写死为错误码 `4902`（外加 MetaMask Mobile 的 `data.originalError.code === 4902`）。
+
+代码实证（`@wagmi/core/dist/esm/connectors/injected.js:327`）：
+
+```js
+if (error.code === 4902 ||
+    error?.data?.originalError?.code === 4902) {
+  // ... wallet_addEthereumChain
+}
+```
+
+问题在于**钱包并不统一返回 4902**：有的返回 `-32603`，有的只在 message 里说
+`Unrecognized chain ID` / `chain has not been added`。这些情况下库会直接把错误抛给用户，
+用户看到一句英文报错，且没有任何自愈路径。
+
+**反面风险同样重要**：用户**主动拒绝**（`4001`）绝不能被误判成"链缺失"——
+那会导致第二次弹窗骚扰用户。
+
+### 发现的问题 2：写入钱包的 RPC 不是我们配置的那个
+
+库只用 `chain.rpcUrls.default.http[0]`（viem 内置的 `https://sepolia.base.org`）。
+平时看不出差别，但一旦运维把 `NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL` 换成自建节点或付费节点，
+**应用连的是新节点、写进用户钱包的却还是公共节点**——配置与用户实际使用的链路不一致。
+
+### 修复
+
+新增 `lib/network.ts`，把网络流程做成可单测的纯逻辑：
+
+- `chainAddParams(config)` —— 生成 `wallet_addEthereumChain` 的完整参数，
+  **RPC 取自应用自身配置**（`config.rpcUrl`），`nativeCurrency` 固定为 `{ name: "Ether", symbol: "ETH", decimals: 18 }`，
+  `blockExplorerUrls` 取自 `config.explorerBase`。切换与添加两个路径共用同一构造函数，杜绝漂移。
+- `addChainOverrides(config)` —— wagmi 接受的子集（不含 `chainId`，由 wagmi 单独传）。
+- `isUnknownChainError(error)` —— 遍历 `code` / `cause` / `data` / `data.originalError` 收集错误码与文案，
+  识别 4902 及各钱包的文案变体；**用户拒绝（4001 / "User rejected"）优先级最高**，直接判为"不是链缺失"。
+  带 `seen` 集合与深度上限，自引用错误不会死循环。
+- `ensureTargetChain(...)` —— 先走钱包切换（并交出我们的 RPC/币种/浏览器）；
+  若错误确实是"不认识这条链"，则**自己**发起 `wallet_addEthereumChain` + 再次 `wallet_switchEthereumChain`；
+  其余错误（含用户拒绝）原样抛出，绝不多弹一次窗。
+- `wrongNetworkMessage(currentChainId, targetName)` —— 横幅会说明用户**当前在哪条链**，
+  并明确告知"由我们直接向钱包请求，无需手动配置"。
+
+`getProvider()` 在 wagmi 里类型是 `unknown`（各连接器差异很大），
+因此在 `lib/network.ts` 内用**运行时形状校验**窄化一次，而不是在组件里散落类型断言。
+
+两个页面（`/creator`、`/setup`）统一改为调用 `switchToTargetChain()`：
+横幅按钮、主按钮的 `switch-network` 分支都走同一入口；
+并新增"**连接后自动询问一次**"——按账户地址守卫只触发一次，断连后重置，用户拒绝则保留横幅与按钮可重试。
+
+### 没有做的事
+
+- 没有绕过钱包、没有伪造切换成功、没有 Mock Provider
+- 没有因为"库已经处理了 4902"就假定所有钱包都合规——但也没有重复弹窗：
+  只有在库确实抛错且错误确属"链缺失"时才自行添加
+- 没有改变 `84532` / `https://sepolia.base.org` / `ETH` 这三项配置
+
+### 回归防护
+
+- `test/unit/network.test.ts`（27 例）：参数构造（含"使用配置里的 RPC 而非硬编码默认值"、
+  mainnet 8453 → `0x2105`）、错误识别的四种嵌套形状与文案变体、
+  **拒绝优先于链缺失**、自引用错误不死循环、`ensureTargetChain` 的三条分支
+  （库已处理 → 不重复调用；链缺失 → 添加后再切换；拒绝/无关错误 → 原样抛出且不调用 provider）、
+  provider 形状不合法时视为无兜底
+- `test/unit/creator-state.test.ts`：新增"用户确认切换后回到 *Create Token*"、
+  "拒绝后仍保留切换入口而不死锁"、"免费路径下无任何关于 RPC / Chain ID 的阻塞项"
+- `test/unit/network.test.ts` 中一条用例直接对 `resolveConfig({})` 断言
+  `chainId === 84532`、`rpcUrl === "https://sepolia.base.org"`，并要求 `chainAddParams` 与其一致
+- 冒烟测试新增 6 条：服务端下发的配置必须带 `chainId: 84532`、
+  `rpcUrl: https://sepolia.base.org`、`explorerBase: https://sepolia.basescan.org`
+  （同时检查渲染结果与 **RSC 序列化负载**）；`/setup` 必须写明当前网络；
+  两个页面**不得**存在要求填写 RPC / chainId 的输入框，**不得**出现"手动输入 RPC"类指引
+
