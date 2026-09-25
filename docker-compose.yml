@@ -14,7 +14,14 @@ services:
       timeout: 5s
       retries: 10
     networks:
-      - token_creator_internal
+      token_creator_internal:
+        # Declared explicitly rather than relying on Compose adding the service
+        # name implicitly. A container created before this service was attached
+        # to the network ends up with no `postgres` DNS alias at all, and then
+        # every query from the app fails with `getaddrinfo ENOTFOUND postgres`.
+        # Naming it here makes the alias part of the file's contract.
+        aliases:
+          - postgres
 
   app:
     build:

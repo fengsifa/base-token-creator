@@ -146,6 +146,111 @@ async function main() {
     record("GET /admin returns 200", admin.status === 200, `status ${admin.status}`);
     record("GET /admin asks for the admin secret", admin.html.includes("Admin sign-in"));
 
+    // ---- token records are admin-only ------------------------------------
+    const recordsPage = await get("/admin/records");
+    record("GET /admin/records returns 200", recordsPage.status === 200, `status ${recordsPage.status}`);
+    record(
+      "GET /admin/records does not render records without a session",
+      !recordsPage.html.includes("Token contract address"),
+    );
+
+    const unauth = await fetch(`${BASE_URL}/api/admin/records`);
+    record(
+      "GET /api/admin/records is 401 without a session",
+      unauth.status === 401,
+      `status ${unauth.status}`,
+    );
+
+    const wrongCookie = await fetch(`${BASE_URL}/api/admin/records`, {
+      headers: { cookie: "tokenbase_admin=not-the-secret" },
+    });
+    record(
+      "GET /api/admin/records is 401 with a wrong cookie",
+      wrongCookie.status === 401,
+      `status ${wrongCookie.status}`,
+    );
+
+    const dataUnauth = await fetch(`${BASE_URL}/api/admin/data`);
+    record(
+      "GET /api/admin/data is 401 without a session",
+      dataUnauth.status === 401,
+      `status ${dataUnauth.status}`,
+    );
+
+    // Nothing public may list creation records: the creator only ever writes.
+    const publicListAttempt = await fetch(`${BASE_URL}/api/creations`);
+    record(
+      "GET /api/creations is not a public listing",
+      publicListAttempt.status === 405 || publicListAttempt.status === 404,
+      `status ${publicListAttempt.status}`,
+    );
+
+    // A wallet address is required, and this is the message the user saw when the
+    // client sent a partial payload to POST. It must stay a hard requirement.
+    const noWallet = await postJson("/api/creations", {
+      network: "Base Sepolia",
+      token_name: "No Wallet",
+      token_symbol: "NW",
+      total_supply: "1000",
+      decimals: 18,
+      status: "success",
+      token_contract_address: "0x000000000000000000000000000000000000dEaD",
+      transaction_hash: `0x${"1".repeat(64)}`,
+    });
+    record(
+      "POST /api/creations requires wallet_address",
+      noWallet.status === 400 && /wallet_address/.test(noWallet.body?.error ?? ""),
+      `status ${noWallet.status}`,
+    );
+
+    const malformedWallet = await postJson("/api/creations", {
+      wallet_address: "0x123",
+      network: "Base Sepolia",
+      token_name: "Bad Wallet",
+      token_symbol: "BW",
+      total_supply: "1000",
+      decimals: 18,
+    });
+    record(
+      "POST /api/creations rejects a malformed wallet address",
+      malformedWallet.status === 400,
+      `status ${malformedWallet.status}`,
+    );
+
+    // A well-formed wallet must get past validation. With no database configured
+    // here the write then fails at the mirror, which is the expected 503 — the
+    // distinction matters, because a 400 would mean the address was refused.
+    const validWallet = await postJson("/api/creations", {
+      wallet_address: "0x75CBA94CDa95866a5294CDFf66C96d8a8B2663EA",
+      network: "Base Sepolia",
+      token_name: "Valid Wallet",
+      token_symbol: "VW",
+      total_supply: "1000",
+      decimals: 18,
+      status: "deploying",
+    });
+    record(
+      "POST /api/creations accepts a real wallet address",
+      validWallet.status !== 400 && !/wallet_address/.test(validWallet.body?.error ?? ""),
+      `status ${validWallet.status}${validWallet.body?.error ? ` — ${validWallet.body.error}` : ""}`,
+    );
+
+    // A record must not be born successful without naming its token.
+    const successWithoutToken = await postJson("/api/creations", {
+      wallet_address: "0x75CBA94CDa95866a5294CDFf66C96d8a8B2663EA",
+      network: "Base Sepolia",
+      token_name: "Sneaky",
+      token_symbol: "SNK",
+      total_supply: "1000",
+      decimals: 18,
+      status: "success",
+    });
+    record(
+      "POST /api/creations refuses success without a token address",
+      successWithoutToken.status === 400,
+      `status ${successWithoutToken.status}`,
+    );
+
     // ---- network configuration reaches the browser intact -----------------
     // The chain settings the wallet is asked to use come from these values, so
     // the server must ship Base Sepolia unchanged. Both the rendered markup and

@@ -227,6 +227,55 @@ Base Sepolia on its own.
 7. Open *View on BaseScan* and confirm the token exists with exactly the
    parameters you entered.
 
+## Creation records and the admin view
+
+Every creation attempt is mirrored into PostgreSQL. **The chain remains the source
+of truth**; the table exists so an operator can answer "who created what".
+
+Each row records the creator's wallet address (taken from the connected wallet,
+never typed), the token name and symbol, the token contract address, the network,
+the total supply and decimals, the transaction hash, and the creation time. One
+wallet owning many tokens is the normal case — there is deliberately no unique
+constraint on `wallet_address`.
+
+A record only becomes `success` when it names both the token contract address and
+the transaction hash, **and the server confirms them against the chain itself**
+(`lib/chain-verify.ts`). A receipt that reverted, or that created a different
+token, is refused with a 409 and nothing is stored. When the chain cannot be
+consulted the record is still stored, but it is marked `chain_verified = false`
+with the reason — never silently upgraded. A failed attempt is never recorded as a
+success and never gains a fabricated address or hash.
+
+If the mirror write fails, the on-chain result is unaffected and the page says so
+explicitly: *the on-chain result stands, but the history record was not saved*.
+
+### Admin
+
+`/admin/records` lists creation records. It reuses the existing `ADMIN_SECRET`
+session — the same one `/admin` uses — and nothing about it is reachable without
+it.
+
+- search by wallet address, by token contract address, or by token name or symbol
+- copy the wallet address or the contract address from any row
+- open the transaction on BaseScan, or the token contract
+- open a record to see every field, including whether it was verified on chain
+- pick a wallet to see every token it created, as a `wallet ├── SYMBOL → address` tree
+
+`GET /api/admin/records` is admin-only and returns 401 without a session. There is
+no public endpoint that lists records.
+
+Migrations:
+
+```bash
+docker compose exec -T postgres psql -U token_creator -d token_creator < migrations/001_initial.sql
+docker compose exec -T postgres psql -U token_creator -d token_creator < migrations/002_token_records.sql
+```
+
+`002` renames two columns in place (data preserved) and adds the verification
+fields. It is guarded, so running it twice is a no-op.
+`bash tokenbase-migration-test.sh` proves it against a real PostgreSQL: rows are
+written under the old names, the migration runs, and every value is compared.
+
 ## Deployment notes
 
 The app is a single Next.js container listening on `127.0.0.1:3000`, behind a

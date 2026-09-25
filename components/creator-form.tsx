@@ -33,6 +33,16 @@ import {
 } from "../lib/creator-state";
 import { validateTokenInput } from "../lib/validation";
 import {
+  checkCreationContext,
+  failureWrite,
+  isRecordId,
+  planRecordWrite,
+  shouldRecreateAsPost,
+  successWrite,
+  type CreationContext,
+  type RecordUpdate,
+} from "../lib/record-write";
+import {
   NO_WALLET_MESSAGE,
   hasInjectedWallet,
   onInjectedWalletAvailable,
@@ -75,7 +85,15 @@ export function CreatorForm() {
   const [deploymentHash, setDeploymentHash] = useState<`0x${string}`>();
   const [tokenAddress, setTokenAddress] = useState("");
   const [onChain, setOnChain] = useState<OnChainToken | null>(null);
-  const [recordId, setRecordId] = useState("");
+  /**
+   * The record id is held in a ref, not state.
+   *
+   * It is read seconds later — from an effect that fires when a transaction mines
+   * — and it decides POST versus PATCH. As state it was captured by whichever
+   * render created the callback, so a write could run against a stale "no id yet"
+   * and take the create path with a partial payload. A ref is always current.
+   */
+  const recordIdRef = useRef("");
   const [injectedAvailable, setInjectedAvailable] = useState(false);
   const [factoryCodeOk, setFactoryCodeOk] = useState<boolean | null>(null);
   const [copied, setCopied] = useState("");
@@ -220,7 +238,7 @@ export function CreatorForm() {
       setDeploymentHash(storedDeployment);
       setStage("deploying");
     }
-    if (storedRecord) setRecordId(storedRecord);
+    if (isRecordId(storedRecord)) recordIdRef.current = storedRecord;
   }, []);
 
   useEffect(() => {
@@ -264,11 +282,42 @@ export function CreatorForm() {
   // Database mirror (never authoritative — the chain is)
   // ---------------------------------------------------------------------------
 
-  const save = useCallback(
-    async (payload: Record<string, unknown>) => {
-      try {
-        const response = await fetch(recordId ? `/api/creations/${recordId}` : "/api/creations", {
-          method: recordId ? "PATCH" : "POST",
+  /**
+   * The full creation context for the attempt in progress.
+   *
+   * Status updates happen seconds after the parameters were typed, and by then
+   * the record may still not exist — the very first write can have failed while
+   * the chain went on to succeed. Holding the context here means such a write can
+   * still send a complete payload instead of a partial insert. See
+   * lib/record-write.ts for the failure this prevents.
+   */
+  const creationContext = useRef<CreationContext | null>(null);
+
+  const writer = useCallback(
+    async (update: RecordUpdate, options: { createIfMissing?: boolean } = {}) => {
+      const { createIfMissing = true } = options;
+      const context = creationContext.current;
+
+      if (!context) return;
+      if (!createIfMissing && !isRecordId(recordIdRef.current)) {
+        // A failure with nothing recorded yet would mean inventing a record for
+        // an attempt that never reached the chain. There is nothing to annotate.
+        return;
+      }
+
+      // A POST must never be attempted with an incomplete context: that is
+      // exactly what produced "wallet_address must be a valid EVM address".
+      const problems = checkCreationContext(context);
+      if (problems.length) {
+        setDbWarning(
+          `On-chain result stands, but the history record was not saved: ${problems.join(" ")}`,
+        );
+        return;
+      }
+
+      const send = async (method: "POST" | "PATCH", url: string, payload: Record<string, unknown>) => {
+        const response = await fetch(url, {
+          method,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
@@ -276,22 +325,40 @@ export function CreatorForm() {
           error?: string;
           record?: { id?: string };
         };
-        if (!response.ok) throw new Error(body.error || "Database error");
-        const id = body.record?.id;
-        if (!recordId && typeof id === "string") {
-          setRecordId(id);
+        return { response, body };
+      };
+
+      try {
+        let plan = planRecordWrite({ recordId: recordIdRef.current, context, update });
+        let result = await send(plan.method, plan.url, plan.body);
+
+        // The record can be gone while the attempt is in flight: cleared data, a
+        // different browser, an expired id. Retrying as a complete create beats
+        // patching something that is not there.
+        if (!result.response.ok && shouldRecreateAsPost(result.response.status, plan.method)) {
+          recordIdRef.current = "";
+          plan = planRecordWrite({ recordId: "", context, update });
+          result = await send(plan.method, plan.url, plan.body);
+        }
+
+        if (!result.response.ok) throw new Error(result.body.error || "Database error");
+
+        const id = result.body.record?.id;
+        if (isRecordId(id) && recordIdRef.current !== id) {
+          recordIdRef.current = id;
           localStorage.setItem("tokenbase.recordId", id);
         }
         setDbWarning("");
       } catch (cause) {
+        // The chain result remains authoritative; only the mirror failed.
         setDbWarning(
           cause instanceof Error
-            ? cause.message
-            : "Database unavailable. The on-chain state remains authoritative.",
+            ? `On-chain result stands, but the history record was not saved: ${cause.message}`
+            : "The history record could not be saved. The on-chain result is unaffected.",
         );
       }
     },
-    [recordId],
+    [],
   );
 
   // ---------------------------------------------------------------------------
@@ -301,15 +368,21 @@ export function CreatorForm() {
   useEffect(() => {
     if (!payment.isSuccess || stage !== "paying") return;
     setStage("payment_confirmed");
-    void save({ status: "payment_confirmed", payment_tx_hash: paymentHash });
-  }, [payment.isSuccess, paymentHash, save, stage]);
+    void writer({ status: "payment_confirmed", payment_tx_hash: paymentHash });
+  }, [payment.isSuccess, paymentHash, writer, stage]);
 
   useEffect(() => {
     if (!payment.isError || stage !== "paying") return;
     const failure = txFailureState("payment", requiresPayment);
     setStage(failure.stage);
     setError(failure.message);
-  }, [payment.isError, stage, requiresPayment]);
+    // Annotates an existing record only; a payment that never confirmed should
+    // not invent one.
+    void writer(
+      failureWrite({ status: "payment_cancelled", reason: failure.message }),
+      { createIfMissing: false },
+    );
+  }, [payment.isError, stage, requiresPayment, writer]);
 
   /** Token address, read from the factory event in the mined receipt. */
   const createdTokenAddress = useMemo(() => {
@@ -340,27 +413,36 @@ export function CreatorForm() {
     if (createdTokenAddress) {
       setTokenAddress(createdTokenAddress);
       setStage("success");
-      void save({
-        status: "success",
-        contract_address: createdTokenAddress,
-        deployment_tx_hash: deploymentHash,
-      });
-      localStorage.removeItem("tokenbase.deploymentHash");
-      localStorage.removeItem("tokenbase.paymentHash");
+
+      if (isTxHash(deploymentHash)) {
+        // The token address came from the TokenCreated event in the mined
+        // receipt. The server re-checks both the receipt and the address against
+        // the chain before it will store this as a successful record.
+        void writer(
+          successWrite({ tokenAddress: createdTokenAddress, transactionHash: deploymentHash }),
+        );
+        localStorage.removeItem("tokenbase.deploymentHash");
+        localStorage.removeItem("tokenbase.paymentHash");
+      } else {
+        setDbWarning(
+          "The token exists on chain, but this browser no longer holds the deployment transaction hash, so the history record cannot name it. The token itself is unaffected.",
+        );
+      }
       return;
     }
 
     // Mined, but no TokenCreated event. Never claim success.
     const failure = txFailureState("deployment", requiresPayment);
     setStage(failure.stage);
-    setError(
-      "The transaction was mined, but its receipt contains no TokenCreated event, so no token address can be confirmed. Open it on BaseScan and inspect the logs before retrying.",
-    );
+    const reason =
+      "The transaction was mined, but its receipt contains no TokenCreated event, so no token address can be confirmed. Open it on BaseScan and inspect the logs before retrying.";
+    setError(reason);
+    void writer(failureWrite({ status: "failed", reason }), { createIfMissing: false });
   }, [
     deployment.isSuccess,
     createdTokenAddress,
     deploymentHash,
-    save,
+    writer,
     stage,
     requiresPayment,
   ]);
@@ -370,7 +452,16 @@ export function CreatorForm() {
     const failure = txFailureState("deployment", requiresPayment);
     setStage(failure.stage);
     setError(failure.message);
-  }, [deployment.isError, stage, requiresPayment]);
+    // The fee is already spent in paid mode, so that case is `failed` rather than
+    // cancelled — the two mean different things to whoever reads the record.
+    void writer(
+      failureWrite({
+        status: requiresPayment ? "failed" : "deployment_cancelled",
+        reason: failure.message,
+      }),
+      { createIfMissing: false },
+    );
+  }, [deployment.isError, stage, requiresPayment, writer]);
 
   // ---------------------------------------------------------------------------
   // Read the created token back from the chain so the user sees verified values
@@ -460,17 +551,16 @@ export function CreatorForm() {
         chainId: config.chainId,
       });
       setPaymentHash(hash);
-      await save({
-        wallet_address: address,
+      creationContext.current = {
+        walletAddress: address,
         network: config.chainName,
-        token_name: validation.ok ? validation.value.name : name.trim(),
-        token_symbol: validation.ok ? validation.value.symbol : symbol.trim().toUpperCase(),
-        total_supply: validation.ok ? validation.value.supply : supply,
+        tokenName: validation.ok ? validation.value.name : name.trim(),
+        tokenSymbol: validation.ok ? validation.value.symbol : symbol.trim().toUpperCase(),
+        totalSupply: validation.ok ? validation.value.supply : supply,
         decimals: validation.ok ? validation.value.decimals : Number(decimals),
-        logo_url: logo || null,
-        payment_tx_hash: hash,
-        status: "pending_payment",
-      });
+        logoUrl: logo || null,
+      };
+      await writer({ status: "pending_payment", payment_tx_hash: hash });
     } catch (cause) {
       const failure = txFailureState("payment", true);
       setStage(failure.stage);
@@ -488,18 +578,23 @@ export function CreatorForm() {
     try {
       setStage("deploying");
 
-      // Mirror the attempt into PostgreSQL. A failure here is a warning only.
-      await save({
-        wallet_address: address,
+      /**
+       * Hold the full creation context. A later write — including one that has to
+       * create the record for the first time, because this one failed — can then
+       * send a complete payload rather than a partial insert.
+       */
+      creationContext.current = {
+        walletAddress: address,
         network: config.chainName,
-        token_name: tokenName,
-        token_symbol: tokenSymbol,
-        total_supply: tokenSupply,
+        tokenName,
+        tokenSymbol,
+        totalSupply: tokenSupply,
         decimals: tokenDecimals,
-        logo_url: logo || null,
-        payment_tx_hash: paymentHash ?? null,
-        status: "deploying",
-      });
+        logoUrl: logo || null,
+      };
+
+      // Mirror the attempt into PostgreSQL. A failure here is a warning only.
+      await writer({ status: "deploying", payment_tx_hash: paymentHash ?? null });
 
       const hash = await writeContractAsync({
         address: config.factoryAddress,

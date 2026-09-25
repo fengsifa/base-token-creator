@@ -1,17 +1,7 @@
-import { timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { ADMIN_COOKIE, safeEqual } from "../../../../lib/admin-auth";
 
 export const runtime = "nodejs";
-
-const cookieName = "tokenbase_admin";
-
-/** Constant-time comparison so the admin secret cannot be probed byte by byte. */
-function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a, "utf8");
-  const right = Buffer.from(b, "utf8");
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
-}
 
 function valid(value: string | undefined): boolean {
   const secret = process.env.ADMIN_SECRET;
@@ -20,7 +10,7 @@ function valid(value: string | undefined): boolean {
 }
 
 export async function GET(request: NextRequest) {
-  return NextResponse.json({ authenticated: valid(request.cookies.get(cookieName)?.value) });
+  return NextResponse.json({ authenticated: valid(request.cookies.get(ADMIN_COOKIE)?.value) });
 }
 
 export async function POST(request: NextRequest) {
@@ -31,7 +21,7 @@ export async function POST(request: NextRequest) {
   }
 
   const response = NextResponse.json({ authenticated: true });
-  response.cookies.set(cookieName, body.secret as string, {
+  response.cookies.set(ADMIN_COOKIE, body.secret as string, {
     httpOnly: true,
     sameSite: "strict",
     secure: process.env.NODE_ENV === "production",
@@ -43,7 +33,7 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE() {
   const response = NextResponse.json({ authenticated: false });
-  response.cookies.set(cookieName, "", {
+  response.cookies.set(ADMIN_COOKIE, "", {
     httpOnly: true,
     sameSite: "strict",
     secure: process.env.NODE_ENV === "production",

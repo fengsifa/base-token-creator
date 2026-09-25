@@ -21,6 +21,7 @@ import {
   tokenFactoryBytecode,
 } from "../../lib/contracts";
 import { validateTokenInput } from "../../lib/validation";
+import { blocksSuccess, verifyTokenCreation } from "../../lib/chain-verify";
 
 /**
  * End-to-end against a real EVM.
@@ -414,5 +415,144 @@ describe("the created token has no privileged surface", () => {
       args: [secondCreator],
     });
     expect(balance).toBe(250n);
+  });
+});
+
+/**
+ * The server-side check that decides whether a creation record may be stored as
+ * a success.
+ *
+ * These run against the same local EVM the rest of the suite uses, so the receipt
+ * and the TokenCreated log are real. The point of the block is that a record can
+ * only become successful when the chain agrees — a claim the server cannot
+ * substantiate is refused, and that refusal is what stops a fabricated success
+ * from ever reaching the records table.
+ */
+describe("server-side verification of a recorded creation", () => {
+  /** The verifier reads config from the environment, so point it at this node. */
+  const envFor = () => ({
+    NEXT_PUBLIC_BASE_NETWORK: "sepolia",
+    NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL: RPC_URL,
+    NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: factory,
+  });
+
+  it("accepts a real creation and returns the address the factory emitted", async () => {
+    const { token, txHash } = await createToken(creator, "Verifiable", "VER", 18, 1000n);
+
+    const outcome = await verifyTokenCreation({
+      transactionHash: txHash,
+      claimedTokenAddress: token,
+      env: envFor(),
+    });
+
+    expect(outcome.outcome).toBe("verified");
+    if (outcome.outcome !== "verified") return;
+    expect(outcome.tokenAddress.toLowerCase()).toBe(token.toLowerCase());
+    // A verified outcome must never block the write.
+    expect(blocksSuccess(outcome)).toBe(false);
+  });
+
+  it("refuses a record that claims a different token than the receipt created", async () => {
+    const { txHash } = await createToken(creator, "Honest", "HON", 18, 1000n);
+    const claimed = "0x000000000000000000000000000000000000dEaD";
+
+    const outcome = await verifyTokenCreation({
+      transactionHash: txHash,
+      claimedTokenAddress: claimed,
+      env: envFor(),
+    });
+
+    expect(outcome.outcome).toBe("mismatch");
+    expect(blocksSuccess(outcome)).toBe(true);
+  });
+
+  it("refuses a transaction that reverted instead of succeeding", async () => {
+    const wallet = createWalletClient({ account: creator, chain: localChain, transport });
+    const data = encodeFunctionData({
+      abi: tokenFactoryAbi,
+      functionName: "createToken",
+      args: ["Out Of Gas", "OOG2", 18, 1n],
+    });
+
+    let hash: Hex;
+    try {
+      // 30k gas is far below the cost of deploying a token, so this reaches the
+      // chain and reverts there rather than being simulated away.
+      hash = await wallet.sendTransaction({ to: factory, data, gas: 30_000n });
+    } catch (cause) {
+      expect(String(cause)).toMatch(/gas|revert/i);
+      return;
+    }
+
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    expect(receipt.status).toBe("reverted");
+
+    const outcome = await verifyTokenCreation({
+      transactionHash: hash,
+      claimedTokenAddress: "0x000000000000000000000000000000000000dEaD",
+      env: envFor(),
+    });
+
+    expect(outcome.outcome).toBe("reverted");
+    expect(blocksSuccess(outcome)).toBe(true);
+  });
+
+  it("reports an unknown transaction as unverifiable, not as a failure", async () => {
+    // A hash nothing mined. This must not be taken for a success, and it must not
+    // be treated as a reverted transaction either: a real creation whose RPC is
+    // lagging should not lose its record.
+    const outcome = await verifyTokenCreation({
+      transactionHash: `0x${"c".repeat(64)}`,
+      claimedTokenAddress: "0x000000000000000000000000000000000000dEaD",
+      env: envFor(),
+    });
+
+    expect(outcome.outcome).toBe("unverifiable");
+    expect(blocksSuccess(outcome)).toBe(false);
+  });
+
+  it("refuses a malformed hash or address before touching the chain", async () => {
+    const badHash = await verifyTokenCreation({
+      transactionHash: "0x1234",
+      claimedTokenAddress: "0x000000000000000000000000000000000000dEaD",
+      env: envFor(),
+    });
+    expect(badHash.outcome).toBe("mismatch");
+    expect(blocksSuccess(badHash)).toBe(true);
+
+    const badAddress = await verifyTokenCreation({
+      transactionHash: `0x${"d".repeat(64)}`,
+      claimedTokenAddress: "0xnotanaddress",
+      env: envFor(),
+    });
+    expect(badAddress.outcome).toBe("mismatch");
+    expect(blocksSuccess(badAddress)).toBe(true);
+  });
+
+  it("does not accept a token created by a different factory", async () => {
+    // A genuine creation from this deployment's factory...
+    const { token, txHash } = await createToken(creator, "Claimed Elsewhere", "CE", 18, 1000n);
+
+    // ...but the app is configured with a different factory address. The receipt
+    // is real and the token is real; it simply is not *this* deployment's token,
+    // so the record must not be accepted as verified.
+    const wallet = createWalletClient({ account: secondCreator, chain: localChain, transport });
+    const deployHash = await wallet.deployContract({
+      abi: tokenFactoryAbi,
+      bytecode: tokenFactoryBytecode,
+      args: [],
+    });
+    const deployReceipt = await publicClient.waitForTransactionReceipt({ hash: deployHash });
+    const otherFactory = deployReceipt.contractAddress as Address;
+    expect(otherFactory.toLowerCase()).not.toBe(factory.toLowerCase());
+
+    const outcome = await verifyTokenCreation({
+      transactionHash: txHash,
+      claimedTokenAddress: token,
+      env: { ...envFor(), NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: otherFactory },
+    });
+
+    expect(outcome.outcome).toBe("mismatch");
+    expect(blocksSuccess(outcome)).toBe(true);
   });
 });
