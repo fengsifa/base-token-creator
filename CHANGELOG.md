@@ -1,5 +1,62 @@
 # Changelog
 
+## 4.0.0
+
+**This release contains no change to the token functionality.** It publishes the
+technical assessment for the requested extension features, so the plan can be
+reviewed and versioned. The six features below are **assessed, not implemented**.
+
+### Added
+
+- **`docs/EXTENSIONS-ASSESSMENT.md`** — the full technical assessment for adding
+  Burnable, Mintable, Pausable, Anti Whale, Anti Bot and Blacklist to the token
+  creator. It covers:
+  - how the current `TokenFactory` + `CreatedToken` pair is implemented, with
+    measured bytecode sizes (Factory runtime 4,333 bytes, of which 3,255 bytes —
+    75% — is `CreatedToken`'s creation code)
+  - why adding any token feature **requires redeploying the Factory**: `new
+    CreatedToken(...)` inlines the child's creation code into the Factory's
+    runtime, so new token code can only reach the chain via a new Factory. The
+    deployed Factory has no owner and no upgrade path, so it cannot be changed in
+    place. This is a compile-time constraint, not a preference.
+  - a per-feature change list, the permission each feature needs, and the
+    EIP-170 budget (20,243 bytes free — room for roughly three to five variants,
+    given feature-bearing tokens are larger than the current one)
+  - the risk register, led by: unbounded `mint` (infinite dilution), `pause`
+    freezing a DEX pool (holders cannot sell), and anti-whale limits that omit the
+    pair/router address (transfers revert, liquidity can lock)
+  - how to keep the frontend from offering features the contract does not have,
+    built on the existing four defences plus four new ones
+
+### Not included
+
+The following are **not implemented** and are not part of this release:
+
+| Feature | Needs an owner? | Status |
+| --- | --- | --- |
+| Burnable | No — `burn` burns the caller's own balance; `burnFrom` uses ERC-20 allowance | Not implemented |
+| Mintable | Yes | Not implemented |
+| Pausable | Yes | Not implemented |
+| Anti Whale | Yes | Not implemented |
+| Anti Bot | Yes | Not implemented |
+| Blacklist | Yes | Not implemented |
+
+The creator page already lists all six as **Unavailable** with an explicit
+"not implemented" note, so the UI does not claim anything the contracts cannot
+do. Note also that the current token has no `burn` at all: sending tokens to a
+dead address reduces your balance but leaves `totalSupply` unchanged, which is
+not the same thing as burning.
+
+Implementation is blocked on eight product decisions recorded in section 7 of the
+assessment — most importantly who owns the tokens (the creator's own wallet or
+the platform), whether `mint` must be capped by a hard `maxSupply`, and whether
+`pause` ships at all given what it does to DEX liquidity.
+
+### Changed
+
+- `package.json` and `package-lock.json` to 4.0.0. No dependency changes; the
+  installed dependency tree is identical to 2.0.0.
+
 ## 2.0.0
 
 The first release where the token creator actually works end to end. The
