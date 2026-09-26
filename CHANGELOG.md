@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 7.0.0
 
 Burnable, Mintable and Pausable become selectable on the creation page, each with its own service fee.
 The three are separate features, so this section is written around the rule that shaped the design.
@@ -69,7 +69,19 @@ The three are separate features, so this section is written around the rule that
 ### Verification
 
 `typecheck`, `unit 161`, `contract 58`, `integration 23`, `build` and `smoke 35` all passing locally.
-No contract has been deployed to Base Sepolia yet.
+
+### Deployed to Base Sepolia
+
+Both factories are live and the live site points at them:
+
+- `TokenFactoryCore` — `0x490704f22558c57f95ddb501d8dae53f94b9274b`
+- `TokenFactoryBurnable` — `0x7444bb7b14d65d180f1f993dee1a4fee4f141641`
+
+Prices on chain: `baseFee`/`burnFee`/`mintFee`/`pauseFee` = 0.000001 ETH each (the Core
+factory carries no `burnFee`, as it never deploys burnable tokens), and the fee recipient
+is `0x75CBA94CDa95866a5294CDFf66C96d8a8B2663EA`. A full-feature token
+(`0x23DffE25285b6b4d7E665Da50C2CCAac4BE8cAF1`) was created end to end and its
+`burn`/`mint`/`pause`/`unpause` selectors verified on chain.
 
 ## 6.0.0
 

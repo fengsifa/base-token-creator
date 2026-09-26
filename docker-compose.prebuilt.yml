@@ -1,0 +1,14 @@
+# Overlay that swaps the app image from "compile from source" to "assemble the
+# output that was built on the developer machine".
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml build app
+#   docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml up -d app
+#
+# Everything else — the postgres service, networks, volumes, the port binding —
+# is inherited from docker-compose.yml unchanged. This is an overlay rather than
+# an edit so that the from-source path keeps working for anyone who wants it.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prebuilt

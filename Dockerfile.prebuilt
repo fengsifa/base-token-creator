@@ -1,0 +1,46 @@
+# Runtime-only image: the application is compiled on the developer machine and
+# shipped as `prebuilt/`, so this file never runs `npm ci` or `next build`.
+#
+#   scripts/pack-prebuilt.sh          # produce prebuilt/ + the tarball, locally
+#   docker compose -f docker-compose.yml -f docker-compose.prebuilt.yml build app
+#
+# Why this exists: the production host is a single-vCPU VPS. Compiling there
+# took about 17 minutes and left the box at load 4 with 3.2 GB of swap in use,
+# because `next build` is CPU-bound and the machine has 1.6 GB of RAM. Copying
+# finished output takes seconds.
+#
+# Moving the output between operating systems is safe here: the standalone
+# bundle contains no native binaries. Verified with
+#   find .next/standalone -name '*.node' | wc -l   ->  0
+# and there is no sharp / bcrypt / pg-native / canvas anywhere in the tree, so
+# there is no compiled code that could be tied to the build platform.
+#
+# The from-source build is still the canonical one for environments that have
+# the CPU and memory for it; that is `Dockerfile`, deliberately left untouched.
+
+FROM node:22-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+# Next's standalone server binds to process.env.HOSTNAME, and inside a container
+# Docker sets that to the container id. Pinning it keeps the listener explicit.
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+# --chown on the copy rather than a later recursive chown: node_modules holds
+# thousands of small files and walking them costs far more than the copy does.
+COPY --chown=appuser:appgroup prebuilt ./
+
+# The named volume for uploads is mounted here, so the directory has to exist
+# and be writable by the unprivileged user.
+RUN mkdir -p /app/public/uploads && chown appuser:appgroup /app/public/uploads
+
+USER appuser
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]

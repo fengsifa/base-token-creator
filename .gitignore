@@ -6,6 +6,10 @@ node_modules
 deploy-tokenbuild.tar.gz
 backups
 
+# Staging tree for the prebuilt runtime image — see scripts/pack-prebuilt.sh.
+# Regenerated from .next on every package, never committed.
+build
+
 # Hardhat
 artifacts
 cache
