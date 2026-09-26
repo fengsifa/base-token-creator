@@ -8,7 +8,10 @@ export const metadata = {
 
 export default function Home() {
   const config = resolveConfig(process.env);
-  const freeMode = config.feeEth === "0" || config.feeEth === "";
+  // The base price is what a plain token costs; each optional feature adds its own
+  // amount on top, and the creator page shows the running total.
+  const baseFee = config.featureFees.base;
+  const freeMode = baseFee === "0" || baseFee === "";
   const steps = [
     "Configure Token",
     "Connect Wallet",
@@ -41,7 +44,7 @@ export default function Home() {
               Create Token
             </Link>
             <span className="notice" style={{ margin: 0 }}>
-              {config.chainName} · {freeMode ? "free (gas only)" : `${config.feeEth} ETH fee`}
+              {config.chainName} · {freeMode ? "free (gas only)" : `from ${baseFee} ETH + gas`}
             </span>
           </div>
         </div>

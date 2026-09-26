@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  creationFailureState,
   deriveCreatorState,
   explorerAddressUrl,
   explorerTxUrl,
   feeSummary,
   isTxHash,
   shortAddress,
-  txFailureState,
   type CreatorStateInput,
 } from "../../lib/creator-state";
 
@@ -122,13 +122,15 @@ describe("deriveCreatorState", () => {
       expect(state.primaryDisabled).toBe(false);
     });
 
-    it("paid mode asks for the fee first", () => {
+    it("paid mode still asks for a single transaction", () => {
+      // The fee no longer has a step of its own: the factory collects it inside
+      // `createToken`, so selecting features adds cost but not a signature.
       const state = deriveCreatorState(
         input({ isConnected: true, chainId: 84532, feeWei: MIN_FEE_WEI, balanceWei: ONE_ETH }),
       );
       expect(state.requiresPayment).toBe(true);
-      expect(state.primaryActionKind).toBe("pay");
-      expect(state.primaryLabel).toBe("Pay & Continue");
+      expect(state.primaryActionKind).toBe("deploy");
+      expect(state.primaryLabel).toBe("Create Token");
       expect(state.primaryDisabled).toBe(false);
     });
 
@@ -141,18 +143,19 @@ describe("deriveCreatorState", () => {
       expect(state.blockers.join(" ")).toMatch(/below the service fee/i);
     });
 
-    it("after the fee is paid the next step is the deployment", () => {
+    it("offers creation directly when features are selected, with no separate payment step", () => {
       const state = deriveCreatorState(
         input({
           isConnected: true,
           chainId: 84532,
           feeWei: MIN_FEE_WEI,
           balanceWei: ONE_ETH,
-          stage: "payment_confirmed",
         }),
       );
+      // One action covers the fee and the deployment: the factory collects the
+      // fee inside `createToken`, so there is nothing to pay beforehand.
       expect(state.primaryActionKind).toBe("deploy");
-      expect(state.primaryLabel).toBe("Deploy Token");
+      expect(state.primaryLabel).toBe("Create Token");
     });
   });
 
@@ -160,7 +163,7 @@ describe("deriveCreatorState", () => {
     it("blocks on an unconfigured factory even in free mode", () => {
       const state = deriveCreatorState(input({ isConnected: true, chainId: 84532, factoryAddress: "" }));
       expect(state.primaryDisabled).toBe(true);
-      expect(state.blockers.join(" ")).toMatch(/factory address is not configured/i);
+      expect(state.blockers.join(" ")).toMatch(/factory address .* is not configured/i);
     });
 
     it("blocks on invalid parameters once connected", () => {
@@ -187,19 +190,13 @@ describe("deriveCreatorState", () => {
   });
 
   describe("in-flight and finished states", () => {
-    it("locks the button while the fee is being paid", () => {
+    it("locks the button while the creation transaction is in flight", () => {
       const state = deriveCreatorState(
-        input({ isConnected: true, chainId: 84532, feeWei: MIN_FEE_WEI, stage: "paying" }),
+        input({ isConnected: true, chainId: 84532, feeWei: MIN_FEE_WEI, stage: "deploying" }),
       );
       expect(state.processing).toBe(true);
       expect(state.primaryActionKind).toBe("pending");
-      expect(state.primaryLabel).toBe("Payment Pending…");
-      expect(state.primaryDisabled).toBe(true);
-    });
-
-    it("locks the button while the token is being deployed", () => {
-      const state = deriveCreatorState(input({ isConnected: true, chainId: 84532, stage: "deploying" }));
-      expect(state.primaryLabel).toBe("Deployment Pending…");
+      expect(state.primaryLabel).toBe("Creating Token…");
       expect(state.primaryDisabled).toBe(true);
     });
 
@@ -212,23 +209,15 @@ describe("deriveCreatorState", () => {
   });
 });
 
-describe("txFailureState", () => {
-  it("returns to the start after a failed payment", () => {
-    const failure = txFailureState("payment", true);
+describe("creationFailureState", () => {
+  it("returns to the start, because the fee and the token share one transaction", () => {
+    // There is deliberately no state where the fee is paid and no token exists:
+    // the factory takes the fee inside `createToken`, so a failure means neither
+    // happened and the whole thing is safely retryable.
+    const failure = creationFailureState();
     expect(failure.stage).toBe("idle");
     expect(failure.message).toMatch(/no token was created/i);
-  });
-
-  it("keeps the paid state after a failed deployment so the fee is not paid twice", () => {
-    const failure = txFailureState("deployment", true);
-    expect(failure.stage).toBe("payment_confirmed");
-    expect(failure.message).toMatch(/not reversed/i);
-  });
-
-  it("returns to the start after a failed deployment when nothing was paid", () => {
-    const failure = txFailureState("deployment", false);
-    expect(failure.stage).toBe("idle");
-    expect(failure.message).toMatch(/nothing was created/i);
+    expect(failure.message).toMatch(/no service fee was charged/i);
   });
 });
 
@@ -242,9 +231,13 @@ describe("helpers", () => {
     );
   });
 
-  it("describes the fee honestly in both modes", () => {
-    expect(feeSummary("0", false)).toMatch(/no service fee/i);
-    expect(feeSummary("0.0001", true)).toBe("0.0001 ETH + Gas");
+  it("states the service fee as a figure that never includes gas", () => {
+    // Gas is paid to the network, not the platform, and its amount is unknown
+    // until the wallet estimates it — folding it in would present a guess as a
+    // price. The page shows it on its own line.
+    expect(feeSummary("0")).toBe("0 ETH");
+    expect(feeSummary("0.000004")).toBe("0.000004 ETH");
+    expect(feeSummary("0.000001")).not.toMatch(/gas/i);
   });
 
   it("only accepts real-looking transaction hashes", () => {

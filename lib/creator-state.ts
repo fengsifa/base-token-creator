@@ -5,21 +5,19 @@
  * decision lives here so it can be unit tested without a browser or a wallet.
  * The React component only renders what these functions return.
  *
- * MVP note: the platform service fee is 0 ETH. When the configured fee is zero
- * the payment leg is skipped entirely and the token is created in a single
- * user-signed transaction. The two-step paid flow still works when a non-zero
- * fee is configured, so no existing deployment behaviour is removed.
+ * One transaction, not two: the factory is `payable` and collects the service fee
+ * inside `createToken`, forwarding it to the fee recipient in the same call. An
+ * earlier revision paid the fee in a separate transfer before deploying, which
+ * left the user with a spent fee if the second transaction failed. The fee now
+ * either happens with the token or not at all.
+ *
+ * The service fee and the network gas are always reported separately. Gas is paid
+ * to the network, never to the platform, and is never part of the quoted price.
  */
 import { NO_WALLET_MESSAGE } from "./wallet";
 
-export type Stage = "idle" | "paying" | "payment_confirmed" | "deploying" | "success";
-export type PrimaryActionKind =
-  | "connect"
-  | "switch-network"
-  | "pay"
-  | "deploy"
-  | "pending"
-  | "done";
+export type Stage = "idle" | "deploying" | "success";
+export type PrimaryActionKind = "connect" | "switch-network" | "deploy" | "pending" | "done";
 
 export type CreatorStateInput = {
   isConnected: boolean;
@@ -30,10 +28,16 @@ export type CreatorStateInput = {
   chainId: number | undefined;
   expectedChainId: number;
   expectedChainName: string;
-  /** Service fee in wei. 0 (or a malformed config) disables the payment leg. */
+  /**
+   * The service fee for the currently selected features, in wei — base price plus
+   * one charge per selected feature. 0 means creation is free apart from gas.
+   */
   feeWei: bigint;
   balanceWei: bigint | undefined;
-  /** Non-empty only when a syntactically valid factory address is configured. */
+  /**
+   * Non-empty only when the factory that will actually receive the call has a
+   * syntactically valid address configured.
+   */
   factoryAddress: string;
   /** Result of validateTokenInput().ok */
   formValid: boolean;
@@ -41,6 +45,7 @@ export type CreatorStateInput = {
 };
 
 export type CreatorState = {
+  /** True when the selected features cost anything at all. */
   requiresPayment: boolean;
   wrongNetwork: boolean;
   insufficientFee: boolean;
@@ -70,6 +75,8 @@ export function deriveCreatorState(input: CreatorStateInput): CreatorState {
 
   const onRightChain = input.isConnected && !wrongNetwork;
 
+  // The wallet must be able to cover the service fee and still have something for
+  // gas; the second condition is reported separately because the remedies differ.
   const insufficientFee =
     requiresPayment &&
     onRightChain &&
@@ -78,7 +85,7 @@ export function deriveCreatorState(input: CreatorStateInput): CreatorState {
 
   const emptyGasBalance = onRightChain && input.balanceWei === 0n;
 
-  const processing = input.stage === "paying" || input.stage === "deploying";
+  const processing = input.stage === "deploying";
 
   let primaryActionKind: PrimaryActionKind;
   if (input.stage === "success") {
@@ -89,11 +96,10 @@ export function deriveCreatorState(input: CreatorStateInput): CreatorState {
     primaryActionKind = "connect";
   } else if (wrongNetwork) {
     primaryActionKind = "switch-network";
-  } else if (input.stage === "payment_confirmed") {
-    primaryActionKind = "deploy";
   } else {
-    // stage === "idle": either pay first (fee configured) or deploy directly.
-    primaryActionKind = requiresPayment ? "pay" : "deploy";
+    // One action covers both the fee and the deployment, so there is no separate
+    // "pay" step to route to.
+    primaryActionKind = "deploy";
   }
 
   let primaryLabel: string;
@@ -102,16 +108,13 @@ export function deriveCreatorState(input: CreatorStateInput): CreatorState {
       primaryLabel = "Token Created";
       break;
     case "pending":
-      primaryLabel = input.stage === "paying" ? "Payment Pending…" : "Deployment Pending…";
+      primaryLabel = "Creating Token…";
       break;
     case "connect":
       primaryLabel = input.connecting ? "Connecting…" : "Connect Wallet";
       break;
     case "switch-network":
       primaryLabel = input.switching ? "Switching…" : `Switch to ${input.expectedChainName}`;
-      break;
-    case "pay":
-      primaryLabel = "Pay & Continue";
       break;
     case "deploy":
       primaryLabel = input.stage === "idle" ? "Create Token" : "Deploy Token";
@@ -130,7 +133,6 @@ export function deriveCreatorState(input: CreatorStateInput): CreatorState {
     case "switch-network":
       primaryDisabled = input.switching;
       break;
-    case "pay":
     case "deploy":
       primaryDisabled =
         !input.formValid || !input.factoryAddress || insufficientFee || !input.hasConnector;
@@ -143,7 +145,7 @@ export function deriveCreatorState(input: CreatorStateInput): CreatorState {
   }
   if (!input.factoryAddress) {
     blockers.push(
-      "The Token Factory address is not configured on this deployment. A configured factory is required before any token can be created.",
+      "The Token Factory address for the selected features is not configured on this deployment. A configured factory is required before any token can be created.",
     );
   }
   if (input.isConnected) {
@@ -167,44 +169,33 @@ export function deriveCreatorState(input: CreatorStateInput): CreatorState {
   };
 }
 
-export type TxKind = "payment" | "deployment";
-
 export type TxFailure = { stage: Stage; message: string };
 
 /**
- * Where the flow returns to after a transaction fails, and what to tell the user.
+ * Where the flow returns to after the creation transaction fails.
  *
- * The two cases are genuinely different and used to be conflated:
- *  - a failed *deployment* after a paid fee cannot silently go back to "idle",
- *    because the fee is already spent on-chain;
- *  - a failed *deployment* with no fee is fully retryable from "idle".
+ * Always "idle": the fee and the token are created by the same transaction, so a
+ * failure means neither happened and the whole thing is safely retryable. There
+ * is no state where money has moved but no token exists, which is exactly why the
+ * two-transaction design was dropped.
  */
-export function txFailureState(kind: TxKind, requiresPayment: boolean): TxFailure {
-  if (kind === "payment") {
-    return {
-      stage: "idle",
-      message:
-        "The payment transaction failed or was rejected on-chain. No token was created and no deployment was started.",
-    };
-  }
-  if (requiresPayment) {
-    return {
-      stage: "payment_confirmed",
-      message:
-        "The deployment transaction failed on-chain. The confirmed service fee was not reversed. You can retry the deployment without paying again.",
-    };
-  }
+export function creationFailureState(): TxFailure {
   return {
     stage: "idle",
     message:
-      "The token deployment transaction failed or was rejected on-chain. Nothing was created. You can fix the parameters and try again.",
+      "The transaction failed or was rejected on-chain, so no token was created and no service fee was charged. Nothing is left half-done — adjust the parameters and try again.",
   };
 }
 
-/** Human summary of what the user is about to pay. */
-export function feeSummary(feeEth: string, requiresPayment: boolean): string {
-  if (!requiresPayment) return "0 ETH (no service fee) + Gas";
-  return `${feeEth} ETH + Gas`;
+/**
+ * The service fee, stated as a figure that never includes gas.
+ *
+ * Gas is not a fee the platform receives and it is not known until the wallet
+ * estimates it, so folding it into this number would be a guess presented as a
+ * price. The page shows it on its own line instead.
+ */
+export function feeSummary(feeEth: string): string {
+  return `${feeEth} ETH`;
 }
 
 export function explorerTxUrl(explorerBase: string, hash: string): string {

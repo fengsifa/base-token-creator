@@ -85,6 +85,27 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `Unknown status "${status}".` }, { status: 400 });
   }
 
+  /**
+   * The optional features the token was created with.
+   *
+   * Optional on the wire — a client that omits them is recording a plain token —
+   * but anything present must be a real boolean. The string "false" is truthy, and
+   * accepting it would record the exact opposite of what was meant.
+   */
+  const features: Record<"burnable" | "mintable" | "pausable", boolean> = {
+    burnable: false,
+    mintable: false,
+    pausable: false,
+  };
+  for (const key of ["burnable", "mintable", "pausable"] as const) {
+    const raw = body[key];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw !== "boolean") {
+      return NextResponse.json({ error: `${key} must be a boolean.` }, { status: 400 });
+    }
+    features[key] = raw;
+  }
+
   const contractAddress = field(body, "token_contract_address", "contract_address");
   if (contractAddress && !ADDRESS_PATTERN.test(contractAddress)) {
     return NextResponse.json(
@@ -129,6 +150,7 @@ export async function POST(request: NextRequest) {
       transaction_hash: transactionHash || null,
       payment_tx_hash: paymentHash || null,
       status,
+      ...features,
     });
     return NextResponse.json({ record: Array.isArray(data) ? data[0] : data });
   } catch (error) {

@@ -27,7 +27,13 @@ function getPool() {
  * Columns a client is allowed to influence through POST /api/creations.
  *
  * `payment_tx_hash` is the optional service-fee transaction and is deliberately
- * separate from `transaction_hash`, which is the token creation transaction.
+ * separate from `transaction_hash`, which is the token creation transaction. The
+ * current flow charges the fee inside the creation transaction, so
+ * `payment_tx_hash` stays null for new records; it is kept because historical rows
+ * have it and dropping a column to tidy up would lose that.
+ *
+ * `burnable`, `mintable` and `pausable` record which features the token was
+ * created with. They are written once, on create — see UPDATABLE_COLUMNS.
  */
 const INSERT_COLUMNS = [
   "wallet_address",
@@ -41,10 +47,18 @@ const INSERT_COLUMNS = [
   "transaction_hash",
   "payment_tx_hash",
   "status",
+  "burnable",
+  "mintable",
+  "pausable",
 ] as const;
 
 /**
  * Columns the server may set later.
+ *
+ * Note what is deliberately absent: `burnable`, `mintable` and `pausable` are
+ * accepted on create but never on update. They record what was bought, which is
+ * settled the moment the token is deployed; letting a later PATCH rewrite them
+ * would let this table drift away from the chain, and the chain is the authority.
  *
  * `chain_verified` and `verified_at` are only ever written by the API after it has
  * consulted the chain itself; they are never taken from a request body.
@@ -53,7 +67,17 @@ const INSERT_COLUMNS = [
  * reason, and the server always overwrites it when a record becomes successful.
  */
 const UPDATABLE_COLUMNS = [
-  ...INSERT_COLUMNS,
+  "wallet_address",
+  "network",
+  "token_name",
+  "token_symbol",
+  "total_supply",
+  "decimals",
+  "logo_url",
+  "token_contract_address",
+  "transaction_hash",
+  "payment_tx_hash",
+  "status",
   "chain_verified",
   "verified_at",
   "verification_note",
@@ -73,6 +97,16 @@ export type TokenRecord = {
   transaction_hash: string | null;
   payment_tx_hash: string | null;
   status: string;
+  /**
+   * The optional features the token was deployed with.
+   *
+   * Recorded for display only. Nothing in this application can mint, burn, pause
+   * or unpause a token: those powers belong to the creator's wallet and are
+   * enforced by the deployed contract.
+   */
+  burnable: boolean;
+  mintable: boolean;
+  pausable: boolean;
   chain_verified: boolean;
   verified_at: Date | null;
   verification_note: string | null;

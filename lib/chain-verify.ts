@@ -10,7 +10,7 @@
  *
  * The outcomes are deliberately distinct:
  *
- *   verified      the receipt succeeded and the factory emitted the claimed token
+ *   verified      the receipt succeeded and one of our factories emitted the claimed token
  *   reverted      the receipt exists and says the transaction failed
  *   mismatch      the receipt succeeded but produced a different token address
  *   unverifiable  the chain could not be consulted, or the transaction is not
@@ -25,7 +25,7 @@
 import { createPublicClient, decodeEventLog, http, isAddress, type Hex } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import { resolveConfig } from "./config";
-import { tokenFactoryAbi } from "./contracts";
+import { factoryEventAbis } from "./contracts";
 
 export type VerifyOutcome =
   | { outcome: "verified"; tokenAddress: string; factoryAddress: string }
@@ -60,7 +60,16 @@ export async function verifyTokenCreation(args: {
   }
 
   const config = resolveConfig(args.env ?? process.env);
-  if (!config.factoryAddress) {
+  /**
+   * Both factories count, and neither is optional: a creation is routed to one
+   * or the other depending on whether Burnable was selected, so checking only
+   * the core address would report every burnable token as unverifiable.
+   */
+  const factoryAddresses = [config.factoryCoreAddress, config.factoryBurnableAddress]
+    .filter(value => value.length > 0)
+    .map(value => value.toLowerCase());
+
+  if (factoryAddresses.length === 0) {
     return {
       outcome: "unverifiable",
       reason: "No factory address is configured on this deployment, so the chain cannot be consulted.",
@@ -85,29 +94,42 @@ export async function verifyTokenCreation(args: {
       };
     }
 
-    const factory = config.factoryAddress.toLowerCase();
     const emitted: string[] = [];
+    /** The factory that actually emitted, taken from the log rather than assumed. */
+    let emittingFactory = "";
 
     for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== factory) continue;
-      try {
-        const decoded = decodeEventLog({
-          abi: tokenFactoryAbi,
-          eventName: "TokenCreated",
-          data: log.data,
-          topics: log.topics,
-        });
-        const token = (decoded.args as { token?: unknown }).token;
-        if (typeof token === "string" && isAddress(token)) emitted.push(token);
-      } catch {
-        // Not a TokenCreated log from a shape we understand; keep looking.
+      if (!factoryAddresses.includes(log.address.toLowerCase())) continue;
+
+      // Two event shapes exist: the current factory's TokenCreated carries the
+      // three feature flags, the original one does not. Their signatures differ,
+      // so exactly one ABI will decode a given log; try both and keep whichever
+      // works rather than guessing from the address.
+      for (const abi of factoryEventAbis) {
+        try {
+          const decoded = decodeEventLog({
+            abi,
+            eventName: "TokenCreated",
+            data: log.data,
+            topics: log.topics,
+          });
+          const token = (decoded.args as { token?: unknown }).token;
+          if (typeof token === "string" && isAddress(token)) {
+            emitted.push(token);
+            emittingFactory = log.address;
+          }
+          break;
+        } catch {
+          // Not this shape; try the next one.
+        }
       }
     }
 
     if (emitted.length === 0) {
       return {
         outcome: "mismatch",
-        reason: "The transaction succeeded but emitted no TokenCreated event, so it did not create a token through this factory.",
+        reason:
+          "The transaction succeeded but emitted no TokenCreated event from a configured factory, so it did not create a token through this deployment.",
       };
     }
 
@@ -126,7 +148,7 @@ export async function verifyTokenCreation(args: {
       };
     }
 
-    return { outcome: "verified", tokenAddress: match, factoryAddress: config.factoryAddress };
+    return { outcome: "verified", tokenAddress: match, factoryAddress: emittingFactory };
   } catch (cause) {
     return {
       outcome: "unverifiable",

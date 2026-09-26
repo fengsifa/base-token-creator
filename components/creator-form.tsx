@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
-import { decodeEventLog, isAddress } from "viem";
+import { decodeEventLog, formatEther, isAddress } from "viem";
 import {
   useAccount,
   useBalance,
@@ -11,7 +11,8 @@ import {
   useConnect,
   useDisconnect,
   usePublicClient,
-  useSendTransaction,
+  useReadContract,
+  useReadContracts,
   useSwitchChain,
   useWaitForTransactionReceipt,
   useWriteContract,
@@ -19,16 +20,24 @@ import {
 import { LogoUpload } from "./logo-upload";
 import { useAppConfig } from "../lib/app-config-context";
 import { feeToWei } from "../lib/config";
-import { describeError, erc20ReadAbi, tokenFactoryAbi } from "../lib/contracts";
+import {
+  TOKEN_FEATURES,
+  describeError,
+  erc20ReadAbi,
+  factoryEventAbis,
+  factoryKindFor,
+  tokenFactoryAbi,
+  type TokenFeatureKey,
+} from "../lib/contracts";
 import { ensureTargetChain, wrongNetworkMessage } from "../lib/network";
 import {
+  creationFailureState,
   deriveCreatorState,
   explorerAddressUrl,
   explorerTxUrl,
   feeSummary,
   isTxHash,
   shortAddress,
-  txFailureState,
   type Stage,
 } from "../lib/creator-state";
 import { validateTokenInput } from "../lib/validation";
@@ -59,18 +68,16 @@ type OnChainToken = {
 /**
  * The token creation flow.
  *
- * Two shapes, chosen by configuration:
- *  - fee = 0 (default): one user-signed transaction calls the factory directly.
- *  - fee > 0: pay the service fee, then deploy — two user-signed transactions.
+ * One transaction: the factory is `payable` and takes the service fee inside
+ * `createToken`, forwarding it to the fee recipient in the same call. There is no
+ * separate payment step, so a failure cannot leave a fee paid with no token.
  *
- * Either way the token address is taken exclusively from the `TokenCreated`
- * event in the mined receipt, and then re-read from the chain. The UI never
- * invents an address, a hash, or a success state.
+ * The token address is taken exclusively from the `TokenCreated` event in the
+ * mined receipt, then re-read from the chain. The UI never invents an address, a
+ * hash, or a success state.
  */
 export function CreatorForm() {
   const config = useAppConfig();
-  const feeWei = useMemo(() => feeToWei(config.feeEth), [config.feeEth]);
-  const requiresPayment = feeWei > 0n;
 
   const [name, setName] = useState("My Token");
   const [symbol, setSymbol] = useState("MTK");
@@ -81,22 +88,28 @@ export function CreatorForm() {
   const [error, setError] = useState("");
   const [dbWarning, setDbWarning] = useState("");
   const [darkMode, setDarkMode] = useState(false);
-  const [paymentHash, setPaymentHash] = useState<`0x${string}`>();
   const [deploymentHash, setDeploymentHash] = useState<`0x${string}`>();
   const [tokenAddress, setTokenAddress] = useState("");
   const [onChain, setOnChain] = useState<OnChainToken | null>(null);
   /**
    * The record id is held in a ref, not state.
    *
-   * It is read seconds later — from an effect that fires when a transaction mines
-   * — and it decides POST versus PATCH. As state it was captured by whichever
-   * render created the callback, so a write could run against a stale "no id yet"
-   * and take the create path with a partial payload. A ref is always current.
+   * It is read seconds later — from an effect that fires when a transaction
+   * mines — and it decides POST versus PATCH. As state it was captured by
+   * whichever render created the callback, so a write could run against a stale
+   * "no id yet" and take the create path with a partial payload. A ref is always
+   * current.
    */
   const recordIdRef = useRef("");
   const [injectedAvailable, setInjectedAvailable] = useState(false);
   const [factoryCodeOk, setFactoryCodeOk] = useState<boolean | null>(null);
   const [copied, setCopied] = useState("");
+  /** Which optional features the user has chosen to pay for. */
+  const [features, setFeatures] = useState<Record<TokenFeatureKey, boolean>>({
+    burnable: false,
+    mintable: false,
+    pausable: false,
+  });
 
   const { address, isConnected, connector } = useAccount();
   const chainId = useChainId();
@@ -107,9 +120,7 @@ export function CreatorForm() {
   // is accurate even while the wallet is still pointed at another network.
   const { data: balance } = useBalance({ address, chainId: config.chainId });
   const publicClient = usePublicClient({ chainId: config.chainId });
-  const { sendTransactionAsync } = useSendTransaction();
   const { writeContractAsync } = useWriteContract();
-  const payment = useWaitForTransactionReceipt({ hash: paymentHash, chainId: config.chainId });
   const deployment = useWaitForTransactionReceipt({ hash: deploymentHash, chainId: config.chainId });
 
   const validation = useMemo(
@@ -123,6 +134,79 @@ export function CreatorForm() {
     [connectors, injectedAvailable],
   );
 
+  /**
+   * Which factory will receive the call.
+   *
+   * Burnable is the split point: it is the only feature that needs no creator
+   * power, so the two factories divide exactly on it (see
+   * contracts/TokenFactoryV2.sol). The user never picks a factory — the feature
+   * selection decides it.
+   */
+  const factoryKind = factoryKindFor(features);
+  const activeFactoryAddress =
+    factoryKind === "burnable" ? config.factoryBurnableAddress : config.factoryCoreAddress;
+
+  /**
+   * The price, read from the very contract that will charge it.
+   *
+   * Deliberately the chain's number rather than a locally recomputed one: the
+   * figure on screen and the amount the transaction must send have to agree
+   * exactly, and displaying what the chain reports is the only way to guarantee
+   * that. The environment values are the fallback for when no factory is
+   * configured yet — a state in which nothing can be created anyway.
+   */
+  const { data: onChainFee } = useReadContract({
+    address: (activeFactoryAddress || undefined) as Address | undefined,
+    abi: tokenFactoryAbi,
+    functionName: "feeFor",
+    args: [features.burnable, features.mintable, features.pausable],
+    chainId: config.chainId,
+    query: { enabled: Boolean(activeFactoryAddress) },
+  });
+
+  /**
+   * The per-feature prices, for the "+0.000001 ETH" label beside each checkbox.
+   *
+   * Read from the same contract that will charge them, so that label is the
+   * contract's own number rather than a copy of an environment value that may
+   * have drifted from what was actually deployed.
+   */
+  const { data: feeParts } = useReadContracts({
+    contracts: [
+      { address: activeFactoryAddress as Address, abi: tokenFactoryAbi, functionName: "baseFee" },
+      { address: activeFactoryAddress as Address, abi: tokenFactoryAbi, functionName: "burnFee" },
+      { address: activeFactoryAddress as Address, abi: tokenFactoryAbi, functionName: "mintFee" },
+      { address: activeFactoryAddress as Address, abi: tokenFactoryAbi, functionName: "pauseFee" },
+    ],
+    query: { enabled: Boolean(activeFactoryAddress) },
+  });
+
+  /**
+   * Position of each feature's price in the batch above. `baseFee` sits at 0 and
+   * is not tied to a checkbox, hence the offset.
+   */
+  const featureFeeEth = (key: TokenFeatureKey): string => {
+    const index = key === "burnable" ? 1 : key === "mintable" ? 2 : 3;
+    const fromChain = feeParts?.[index]?.result;
+    if (typeof fromChain === "bigint") return formatEther(fromChain);
+    return config.featureFees[key];
+  };
+
+  const feeWei = useMemo(() => {
+    if (typeof onChainFee === "bigint") return onChainFee;
+    return (
+      feeToWei(config.featureFees.base) +
+      (features.burnable ? feeToWei(config.featureFees.burnable) : 0n) +
+      (features.mintable ? feeToWei(config.featureFees.mintable) : 0n) +
+      (features.pausable ? feeToWei(config.featureFees.pausable) : 0n)
+    );
+  }, [onChainFee, config.featureFees, features]);
+
+  /** The figure shown to the user. Network gas is never folded into it. */
+  const feeEth = useMemo(() => formatEther(feeWei), [feeWei]);
+  const priceFromChain = typeof onChainFee === "bigint";
+  const requiresPayment = feeWei > 0n;
+
   const state = useMemo(
     () =>
       deriveCreatorState({
@@ -135,7 +219,7 @@ export function CreatorForm() {
         expectedChainName: config.chainName,
         feeWei,
         balanceWei: balance?.value,
-        factoryAddress: config.factoryAddress,
+        factoryAddress: activeFactoryAddress,
         formValid: validation.ok,
         stage,
       }),
@@ -147,7 +231,7 @@ export function CreatorForm() {
       chainId,
       config.chainId,
       config.chainName,
-      config.factoryAddress,
+      activeFactoryAddress,
       feeWei,
       balance?.value,
       validation.ok,
@@ -207,8 +291,8 @@ export function CreatorForm() {
     void switchToTargetChain();
   }, [isConnected, address, state.wrongNetwork, switchToTargetChain]);
 
-  /** The address is configured but has no bytecode on this chain. */
-  const factoryCodeMissing = Boolean(config.factoryAddress) && factoryCodeOk === false;
+  /** The selected factory's address is configured but has no bytecode on this chain. */
+  const factoryCodeMissing = Boolean(activeFactoryAddress) && factoryCodeOk === false;
 
   // ---------------------------------------------------------------------------
   // Environment detection
@@ -229,21 +313,19 @@ export function CreatorForm() {
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    const storedPayment = localStorage.getItem("tokenbase.paymentHash");
     const storedDeployment = localStorage.getItem("tokenbase.deploymentHash");
     const storedRecord = localStorage.getItem("tokenbase.recordId");
 
-    if (isTxHash(storedPayment)) setPaymentHash(storedPayment);
     if (isTxHash(storedDeployment)) {
       setDeploymentHash(storedDeployment);
       setStage("deploying");
     }
     if (isRecordId(storedRecord)) recordIdRef.current = storedRecord;
+    // The previous two-transaction flow stored a payment hash here. It no longer
+    // describes anything — the fee travels with the creation now — so it is
+    // removed rather than left behind as a key nothing reads.
+    localStorage.removeItem("tokenbase.paymentHash");
   }, []);
-
-  useEffect(() => {
-    if (paymentHash) localStorage.setItem("tokenbase.paymentHash", paymentHash);
-  }, [paymentHash]);
 
   useEffect(() => {
     if (deploymentHash) localStorage.setItem("tokenbase.deploymentHash", deploymentHash);
@@ -261,10 +343,10 @@ export function CreatorForm() {
     let cancelled = false;
     setFactoryCodeOk(null);
 
-    if (!publicClient || !config.factoryAddress) return;
+    if (!publicClient || !activeFactoryAddress) return;
 
     publicClient
-      .getBytecode({ address: config.factoryAddress })
+      .getBytecode({ address: activeFactoryAddress })
       .then(code => {
         if (!cancelled) setFactoryCodeOk(Boolean(code && code !== "0x"));
       })
@@ -276,7 +358,7 @@ export function CreatorForm() {
     return () => {
       cancelled = true;
     };
-  }, [publicClient, config.factoryAddress]);
+  }, [publicClient, activeFactoryAddress]);
 
   // ---------------------------------------------------------------------------
   // Database mirror (never authoritative — the chain is)
@@ -365,47 +447,41 @@ export function CreatorForm() {
   // Transaction lifecycle
   // ---------------------------------------------------------------------------
 
-  useEffect(() => {
-    if (!payment.isSuccess || stage !== "paying") return;
-    setStage("payment_confirmed");
-    void writer({ status: "payment_confirmed", payment_tx_hash: paymentHash });
-  }, [payment.isSuccess, paymentHash, writer, stage]);
-
-  useEffect(() => {
-    if (!payment.isError || stage !== "paying") return;
-    const failure = txFailureState("payment", requiresPayment);
-    setStage(failure.stage);
-    setError(failure.message);
-    // Annotates an existing record only; a payment that never confirmed should
-    // not invent one.
-    void writer(
-      failureWrite({ status: "payment_cancelled", reason: failure.message }),
-      { createIfMissing: false },
-    );
-  }, [payment.isError, stage, requiresPayment, writer]);
-
-  /** Token address, read from the factory event in the mined receipt. */
+  /**
+   * Token address, read from the factory event in the mined receipt.
+   *
+   * Both factory addresses are accepted, because the creation may have been
+   * routed to either one, and both event shapes are tried: the current factory's
+   * TokenCreated carries the three feature flags while the original one does not.
+   * Their signatures differ, so at most one ABI decodes any given log.
+   */
   const createdTokenAddress = useMemo(() => {
     const logs = deployment.data?.logs;
-    if (!logs || !config.factoryAddress) return undefined;
+    if (!logs) return undefined;
+
+    const factories = [config.factoryCoreAddress, config.factoryBurnableAddress]
+      .filter(Boolean)
+      .map(value => value.toLowerCase());
 
     for (const log of logs) {
-      if (log.address.toLowerCase() !== config.factoryAddress.toLowerCase()) continue;
-      try {
-        const decoded = decodeEventLog({
-          abi: tokenFactoryAbi,
-          eventName: "TokenCreated",
-          data: log.data,
-          topics: log.topics,
-        });
-        const token = decoded.args.token;
-        if (typeof token === "string" && isAddress(token)) return token;
-      } catch {
-        // Not a TokenCreated log — keep looking.
+      if (!factories.includes(log.address.toLowerCase())) continue;
+      for (const abi of factoryEventAbis) {
+        try {
+          const decoded = decodeEventLog({
+            abi,
+            eventName: "TokenCreated",
+            data: log.data,
+            topics: log.topics,
+          });
+          const token = (decoded.args as { token?: unknown }).token;
+          if (typeof token === "string" && isAddress(token)) return token;
+        } catch {
+          // Not this shape — try the next one, then the next log.
+        }
       }
     }
     return undefined;
-  }, [deployment.data, config.factoryAddress]);
+  }, [deployment.data, config.factoryCoreAddress, config.factoryBurnableAddress]);
 
   useEffect(() => {
     if (!deployment.isSuccess || stage !== "deploying") return;
@@ -432,7 +508,7 @@ export function CreatorForm() {
     }
 
     // Mined, but no TokenCreated event. Never claim success.
-    const failure = txFailureState("deployment", requiresPayment);
+    const failure = creationFailureState();
     setStage(failure.stage);
     const reason =
       "The transaction was mined, but its receipt contains no TokenCreated event, so no token address can be confirmed. Open it on BaseScan and inspect the logs before retrying.";
@@ -444,24 +520,24 @@ export function CreatorForm() {
     deploymentHash,
     writer,
     stage,
-    requiresPayment,
   ]);
 
   useEffect(() => {
     if (!deployment.isError || stage !== "deploying") return;
-    const failure = txFailureState("deployment", requiresPayment);
+    const failure = creationFailureState();
     setStage(failure.stage);
     setError(failure.message);
-    // The fee is already spent in paid mode, so that case is `failed` rather than
-    // cancelled — the two mean different things to whoever reads the record.
+    // The fee and the token are produced by the same transaction, so a failure
+    // here means neither happened — `deployment_cancelled` says exactly that,
+    // unlike the old flow where a spent fee made it a `failed`.
     void writer(
       failureWrite({
-        status: requiresPayment ? "failed" : "deployment_cancelled",
+        status: "deployment_cancelled",
         reason: failure.message,
       }),
       { createIfMissing: false },
     );
-  }, [deployment.isError, stage, requiresPayment, writer]);
+  }, [deployment.isError, stage, writer]);
 
   // ---------------------------------------------------------------------------
   // Read the created token back from the chain so the user sees verified values
@@ -531,46 +607,9 @@ export function CreatorForm() {
     );
   };
 
-  const pay = async () => {
-    setError("");
-    if (!address) return;
-
-    const recipient = config.feeRecipient;
-    if (!recipient || feeWei <= 0n) {
-      setError(
-        "The service fee is not usable: a positive fee needs a valid fee recipient address. Use the free mode (fee 0) or fix the configuration.",
-      );
-      return;
-    }
-
-    try {
-      setStage("paying");
-      const hash = await sendTransactionAsync({
-        to: recipient,
-        value: feeWei,
-        chainId: config.chainId,
-      });
-      setPaymentHash(hash);
-      creationContext.current = {
-        walletAddress: address,
-        network: config.chainName,
-        tokenName: validation.ok ? validation.value.name : name.trim(),
-        tokenSymbol: validation.ok ? validation.value.symbol : symbol.trim().toUpperCase(),
-        totalSupply: validation.ok ? validation.value.supply : supply,
-        decimals: validation.ok ? validation.value.decimals : Number(decimals),
-        logoUrl: logo || null,
-      };
-      await writer({ status: "pending_payment", payment_tx_hash: hash });
-    } catch (cause) {
-      const failure = txFailureState("payment", true);
-      setStage(failure.stage);
-      setError(describeError(cause));
-    }
-  };
-
   const deploy = async () => {
     setError("");
-    if (!address || !config.factoryAddress || !validation.ok) return;
+    if (!address || !activeFactoryAddress || !validation.ok) return;
 
     const { name: tokenName, symbol: tokenSymbol, decimals: tokenDecimals, supply: tokenSupply, rawSupply } =
       validation.value;
@@ -591,23 +630,42 @@ export function CreatorForm() {
         totalSupply: tokenSupply,
         decimals: tokenDecimals,
         logoUrl: logo || null,
+        burnable: features.burnable,
+        mintable: features.mintable,
+        pausable: features.pausable,
       };
 
       // Mirror the attempt into PostgreSQL. A failure here is a warning only.
-      await writer({ status: "deploying", payment_tx_hash: paymentHash ?? null });
+      // There is no separate payment transaction any more, so no payment hash.
+      await writer({ status: "deploying", payment_tx_hash: null });
 
+      /**
+       * One transaction: the service fee rides along as `msg.value` and the
+       * factory forwards it to the fee recipient inside the same call. The amount
+       * is the figure already on screen, read from `feeFor()` on this very
+       * contract, so the two cannot disagree without reverting with `WrongFee`.
+       */
       const hash = await writeContractAsync({
-        address: config.factoryAddress,
+        address: activeFactoryAddress,
         abi: tokenFactoryAbi,
         functionName: "createToken",
-        args: [tokenName, tokenSymbol, tokenDecimals, rawSupply],
+        args: [
+          tokenName,
+          tokenSymbol,
+          tokenDecimals,
+          rawSupply,
+          features.burnable,
+          features.mintable,
+          features.pausable,
+        ],
+        value: feeWei,
         chainId: config.chainId,
       });
 
       setDeploymentHash(hash);
       localStorage.setItem("tokenbase.deploymentHash", hash);
     } catch (cause) {
-      const failure = txFailureState("deployment", requiresPayment);
+      const failure = creationFailureState();
       setStage(failure.stage);
       setError(describeError(cause));
     }
@@ -620,9 +678,6 @@ export function CreatorForm() {
         return;
       case "switch-network":
         void switchToTargetChain();
-        return;
-      case "pay":
-        void pay();
         return;
       case "deploy":
         void deploy();
@@ -641,8 +696,6 @@ export function CreatorForm() {
       setError("Clipboard access was blocked by the browser. Select and copy the value manually.");
     }
   };
-
-  const retryableDeployment = !requiresPayment || stage === "payment_confirmed";
 
   return (
     <main>
@@ -687,7 +740,7 @@ export function CreatorForm() {
         {/* ------------------------------------------------------------------ */}
         {/* Deployment configuration problems, stated plainly                   */}
         {/* ------------------------------------------------------------------ */}
-        {!config.factoryAddress && (
+        {!activeFactoryAddress && (
           <div className="form-section">
             <div className="notice warning">
               <strong>Token Factory is not configured yet.</strong> No token can be created until a
@@ -799,18 +852,32 @@ export function CreatorForm() {
               <h2>Service fee</h2>
               <p>
                 {requiresPayment
-                  ? "A non-zero service fee is configured, so creation is two wallet transactions: the fee, then the deployment."
-                  : "Free mode: there is no service fee. Creating a token is a single wallet transaction and you only pay network gas."}
+                  ? "Your selected features are charged as the service fee, sent together with the deployment in a single wallet transaction."
+                  : "No optional features are selected and the base price is zero, so there is no service fee — you pay network gas only."}
               </p>
             </div>
           </div>
           <div className="mini-row">
-            <span className="muted">Total fees</span>
-            <strong>{feeSummary(config.feeEth, requiresPayment)}</strong>
+            <span className="muted">Service Fee</span>
+            <strong>{feeSummary(feeEth)}</strong>
+          </div>
+          <div className="mini-row">
+            <span className="muted">Network Gas</span>
+            <strong>+ Gas</strong>
+          </div>
+          <div className="mini-row">
+            <span className="muted">Total</span>
+            <strong>{feeSummary(feeEth)} + Gas</strong>
           </div>
           <div className="mini-row">
             <span className="muted">Transactions you will sign</span>
-            <strong>{requiresPayment ? "2 (fee, then deploy)" : "1 (deploy only)"}</strong>
+            <strong>1 (creation and fee together)</strong>
+          </div>
+          <div className="mini-row">
+            <span className="muted">Where this price comes from</span>
+            <span className="mono">
+              {priceFromChain ? "the factory contract (feeFor)" : "environment configuration"}
+            </span>
           </div>
           {requiresPayment && (
             <div className="mini-row">
@@ -827,25 +894,42 @@ export function CreatorForm() {
           <div className="section-heading">
             <div>
               <h2>Token Properties</h2>
-              <p>Not implemented by TokenFactory. Shown so nobody expects them.</p>
+              <p>
+                Optional. Each feature is deployed as its own contract, so anything you leave
+                unselected genuinely does not exist in your token — anyone can confirm that on
+                BaseScan. The base token is fixed supply with no owner and no backdoor.
+              </p>
             </div>
           </div>
           <div className="property-grid">
-            {[
-              ["◒", "Burnable", "Enable the ability to permanently remove tokens from circulation by burning"],
-              ["▤", "Mintable", "Enable minting for your token, only the owner can mint."],
-              ["Ⅱ", "Pausable", "Allows pausing all token transfers and trading activity temporarily"],
-            ].map(([icon, title, description]) => (
-              <div className="property-card is-disabled" key={title}>
-                <div className="property-top">
-                  <span className="property-name">
-                    {icon}&nbsp; {title}
-                  </span>
-                  <span className="property-price">Unavailable</span>
-                </div>
-                <p>{description}</p>
-              </div>
-            ))}
+            {TOKEN_FEATURES.map(feature => {
+              const isSelected = features[feature.key];
+              return (
+                <label
+                  className={`property-card${isSelected ? " is-selected" : ""}`}
+                  key={feature.key}
+                  style={{ cursor: "pointer" }}
+                >
+                  <div className="property-top">
+                    <span className="property-name">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={event =>
+                          setFeatures(previous => ({
+                            ...previous,
+                            [feature.key]: event.target.checked,
+                          }))
+                        }
+                      />{" "}
+                      {feature.label}
+                    </span>
+                    <span className="property-price">+{featureFeeEth(feature.key)} ETH</span>
+                  </div>
+                  <p>{feature.blurb}</p>
+                </label>
+              );
+            })}
           </div>
         </div>
 
@@ -883,9 +967,8 @@ export function CreatorForm() {
             <div>
               <h2>Wallet and deployment</h2>
               <p>
-                {requiresPayment
-                  ? "Connect your wallet to pay the service fee and deploy your token."
-                  : "Connect your wallet and deploy your token in one signed transaction."}
+                Connect your wallet and create your token in one signed transaction. The service fee
+                for the features you selected is included in it.
               </p>
             </div>
           </div>
@@ -914,7 +997,7 @@ export function CreatorForm() {
           {factoryCodeMissing && (
             <div className="error" style={{ marginTop: 10 }}>
               No contract code was found at the configured factory address{" "}
-              <span className="mono">{config.factoryAddress}</span> on {config.chainName}. Check the
+              <span className="mono">{activeFactoryAddress}</span> on {config.chainName}. Check the
               address, or deploy the factory first.
             </div>
           )}
@@ -938,36 +1021,6 @@ export function CreatorForm() {
                   <li key={blocker}>{blocker}</li>
                 ))}
               </ul>
-            </div>
-          )}
-
-          {stage === "paying" && (
-            <div className="status">
-              <strong>Payment pending</strong>
-              <span className="muted">
-                Confirm the transaction in your wallet, then wait for the receipt.
-              </span>
-              {paymentHash && (
-                <div className="mono">
-                  <a href={explorerTxUrl(config.explorerBase, paymentHash)} target="_blank" rel="noreferrer">
-                    View payment transaction ↗
-                  </a>
-                </div>
-              )}
-            </div>
-          )}
-
-          {stage === "payment_confirmed" && (
-            <div className="status">
-              <strong>Payment confirmed on-chain</strong>
-              <span className="muted">Your token is ready for deployment.</span>
-              {paymentHash && (
-                <div className="mono">
-                  <a href={explorerTxUrl(config.explorerBase, paymentHash)} target="_blank" rel="noreferrer">
-                    View payment transaction ↗
-                  </a>
-                </div>
-              )}
             </div>
           )}
 
@@ -1058,23 +1111,18 @@ export function CreatorForm() {
                 </button>
               </div>
               <div className="total-fees">
-                Total Fees: <strong>{feeSummary(config.feeEth, requiresPayment)}</strong>
+                Service Fee: <strong>{feeSummary(feeEth)}</strong> · Network Gas:{" "}
+                <strong>+ Gas</strong>
               </div>
             </>
-          )}
-
-          {requiresPayment && retryableDeployment && stage === "payment_confirmed" && (
-            <div className="helper" style={{ paddingLeft: 0 }}>
-              The service fee is already paid. Retrying only sends the deployment transaction.
-            </div>
           )}
         </div>
       </section>
 
       <div className="footer-note">
         Your wallet signs every transaction. No private keys and no seed phrases are ever requested by
-        this app. Payments ({config.feeEth} ETH configured) and deployments are separate user-signed
-        transactions when a fee is set.
+        this app. The service fee for the features you select is charged inside the same transaction
+        that creates the token, and network gas is always separate from it.
       </div>
     </main>
   );

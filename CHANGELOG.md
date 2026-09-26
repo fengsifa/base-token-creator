@@ -1,5 +1,76 @@
 # Changelog
 
+## Unreleased
+
+Burnable, Mintable and Pausable become selectable on the creation page, each with its own service fee.
+The three are separate features, so this section is written around the rule that shaped the design.
+
+### Added
+
+- **Three optional token features, priced individually.** `Burnable`, `Mintable` and `Pausable` are
+  checkboxes in the existing Token Properties panel; each adds 0.000001 ETH to the 0.000001 ETH base
+  price, so all three cost 0.000004 ETH. Network gas is shown on its own line and is never folded into
+  the service fee.
+- **`contracts/tokens/CreatedTokens.sol`** — eight token contracts, one per feature combination, plus a
+  shared `CreatedTokenBase` and a `BurnableFeature`. Why eight contracts rather than one with three
+  flags: a flag-guarded feature still has its code on chain, so a token without Mintable would still
+  carry `mint` and only a boolean would stand between a stranger and it. Each combination is therefore
+  its own contract, and an unselected feature genuinely has no selector — checkable on BaseScan without
+  trusting this repository. The contract test suite asserts this by searching the **deployed bytecode**
+  for each selector, across all eight combinations, because a call that reverts can also just be a
+  permission failure.
+- **`contracts/TokenFactoryV2.sol`** — `TokenFactoryCore` and `TokenFactoryBurnable`. Two factories,
+  because `new TokenX()` inlines TokenX's creation code and the eight variants total 30664 bytes against
+  the 24576-byte EIP-170 limit; the split is on Burnable, the only feature needing no creator power, so
+  "which factory" and "does this token have an admin" line up exactly. Both are `payable`, compute the
+  price from their own table, require `msg.value` to match it exactly, and forward it to the recipient
+  in the same call — one transaction, and the factory holds nothing.
+- **`docs/TOKEN-PROPERTIES.md`** — the design, the bytecode budget, what `pause` does to mint and burn,
+  and how to verify a token's powers on BaseScan yourself.
+
+### Changed
+
+- **Creating a token is now a single transaction.** The fee used to be paid in a separate transfer
+  before deploying, which left a paid fee behind if the second transaction failed. The factory collects
+  it inside `createToken`, so the fee and the token either both happen or neither does, and the failure
+  state no longer has to distinguish "paid but undeployed" from "nothing happened".
+- **The price shown is the price the contract reports.** The page displays `feeFor()` and the individual
+  `baseFee`/`burnFee`/`mintFee`/`pauseFee` values read from the configured factory, so the number on
+  screen and the number the chain demands cannot drift. The environment values decide what the factories
+  are deployed with and are the fallback while no factory is configured.
+- **`configuration`** — two factory addresses per network
+  (`NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA`, `..._BURNABLE_SEPOLIA`) and four prices
+  (`NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA`, `NEXT_PUBLIC_BURNABLE_FEE_SEPOLIA`,
+  `NEXT_PUBLIC_MINTABLE_FEE_SEPOLIA`, `NEXT_PUBLIC_PAUSABLE_FEE_SEPOLIA`).
+- **The minimum-fee floor is gone.** A previous revision raised any non-zero fee below 0.0001 ETH up to
+  that value; it would have silently rewritten the 0.000001 test price and made the page disagree with
+  the chain. `test/unit/config.test.ts` guards against its return.
+- **`/setup` deploys both factories** in sequence, with the prices from the environment as constructor
+  arguments, and prints the full env block afterwards.
+
+### Backend
+
+- `migrations/003_token_features.sql` adds `burnable`, `mintable` and `pausable` to `tokens`, defaulting
+  existing rows to false — the honest value, since those tokens predate the features. Accepted on create,
+  **deliberately not updatable**: they record what was bought, which the deployed contract settles, and a
+  later PATCH must not be able to make the table disagree with the chain. The admin records view shows
+  them per row and per record.
+- Nothing in the application can mint, burn, pause or unpause a token. The dashboard reads and displays;
+  the on-chain `creator` remains the only address holding those powers.
+
+### Compatibility
+
+- The original factory `0xF7606511aC1E18224A21d851B1cFa7258D3AC684` and both tokens already created with
+  it are untouched. Its source, ABI and compiled artifact are kept so
+  `scripts/verify-live-factory.mjs` keeps verifying the live bytecode.
+- `lib/contracts.ts` now carries both generations: the shared ABI of the new factories and the original
+  one, and `chain-verify.ts` accepts a `TokenCreated` log from either factory in either event shape.
+
+### Verification
+
+`typecheck`, `unit 161`, `contract 58`, `integration 23`, `build` and `smoke 35` all passing locally.
+No contract has been deployed to Base Sepolia yet.
+
 ## 6.0.0
 
 **This release contains no change to the code.** It exists to give a name to the code

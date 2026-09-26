@@ -15,11 +15,26 @@ type CreationRecord = {
   transaction_hash: string | null;
   payment_tx_hash: string | null;
   status: string;
+  /**
+   * The optional features the token was deployed with.
+   *
+   * Shown, never used: this dashboard cannot mint, burn, pause or unpause
+   * anything, and these flags are not what grants or withholds those powers. The
+   * deployed contract's `creator` is the only address that holds them.
+   */
+  burnable: boolean;
+  mintable: boolean;
+  pausable: boolean;
   chain_verified: boolean;
   verified_at: string | null;
   verification_note: string | null;
   created_at: string;
 };
+
+/** A feature flag as the tick or cross an operator scans for. */
+function featureMark(on: boolean): string {
+  return on ? "✓" : "✗";
+}
 
 type WalletRow = {
   wallet_address: string;
@@ -463,6 +478,7 @@ export default function AdminRecordsPage() {
                 <th>Token contract address</th>
                 <th>Network</th>
                 <th>Total supply</th>
+                <th title="Burnable · Mintable · Pausable">Features</th>
                 <th>Transaction hash</th>
                 <th>Created at</th>
                 <th>Status</th>
@@ -516,6 +532,10 @@ export default function AdminRecordsPage() {
                     {row.total_supply}
                     <span className="muted"> · {row.decimals} dp</span>
                   </td>
+                  <td className="mono" title="Burnable · Mintable · Pausable">
+                    {featureMark(row.burnable)} {featureMark(row.mintable)}{" "}
+                    {featureMark(row.pausable)}
+                  </td>
                   <td className="mono">
                     {row.transaction_hash ? (
                       <a
@@ -541,7 +561,7 @@ export default function AdminRecordsPage() {
               ))}
               {records.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="muted">
+                  <td colSpan={10} className="muted">
                     No records match this search.
                   </td>
                 </tr>
@@ -622,6 +642,18 @@ export default function AdminRecordsPage() {
             <strong>
               {selected.total_supply} · {selected.decimals}
             </strong>
+          </div>
+          <div className="mini-row">
+            <span className="muted">Burnable</span>
+            <strong>{featureMark(selected.burnable)}</strong>
+          </div>
+          <div className="mini-row">
+            <span className="muted">Mintable</span>
+            <strong>{featureMark(selected.mintable)}</strong>
+          </div>
+          <div className="mini-row">
+            <span className="muted">Pausable</span>
+            <strong>{featureMark(selected.pausable)}</strong>
           </div>
           <div className="mini-row">
             <span className="muted">Status</span>

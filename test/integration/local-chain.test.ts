@@ -6,6 +6,7 @@ import {
   defineChain,
   encodeFunctionData,
   http,
+  parseEther,
   parseUnits,
   toFunctionSelector,
   type Address,
@@ -16,9 +17,10 @@ import {
 import {
   describeError,
   erc20ReadAbi,
-  factoryArtifactReady,
+  factoryArtifactsReady,
+  factoryBytecode,
+  factoryDeployAbi,
   tokenFactoryAbi,
-  tokenFactoryBytecode,
 } from "../../lib/contracts";
 import { validateTokenInput } from "../../lib/validation";
 import { blocksSuccess, verifyTokenCreation } from "../../lib/chain-verify";
@@ -81,19 +83,48 @@ function findTokenCreated(logs: readonly Log[]): Address {
   throw new Error("No TokenCreated event was found in the receipt.");
 }
 
+type Features = { burnable: boolean; mintable: boolean; pausable: boolean };
+const NO_FEATURES: Features = { burnable: false, mintable: false, pausable: false };
+
+/** The MVP test prices, matching the ones the app configures. */
+const BASE_FEE = parseEther("0.000001");
+const MINT_FEE = parseEther("0.000001");
+const PAUSE_FEE = parseEther("0.000001");
+
+/**
+ * Create a token the way the browser does: the price is read from the contract
+ * with `feeFor` and sent as `msg.value` on the creation call itself, so the
+ * amount paid is exactly the amount the contract quoted.
+ */
 async function createToken(
   from: Address,
   name: string,
   symbol: string,
   decimals: number,
   supply: bigint,
+  features: Features = NO_FEATURES,
 ): Promise<{ token: Address; txHash: Hex }> {
   const wallet = createWalletClient({ account: from, chain: localChain, transport });
+  const value = await publicClient.readContract({
+    address: factory,
+    abi: tokenFactoryAbi,
+    functionName: "feeFor",
+    args: [features.burnable, features.mintable, features.pausable],
+  });
   const txHash = await wallet.writeContract({
     address: factory,
     abi: tokenFactoryAbi,
     functionName: "createToken",
-    args: [name, symbol, decimals, supply],
+    args: [
+      name,
+      symbol,
+      decimals,
+      supply,
+      features.burnable,
+      features.mintable,
+      features.pausable,
+    ],
+    value,
   });
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
   expect(receipt.status).toBe("success");
@@ -121,7 +152,7 @@ async function callReverts(to: Address, data: Hex, from?: Address): Promise<bool
 }
 
 beforeAll(async () => {
-  expect(factoryArtifactReady, "the committed factory bytecode must be built").toBe(true);
+  expect(factoryArtifactsReady, "the committed factory bytecode must be built").toBe(true);
 
   accounts = await fetchAccounts();
   expect(accounts.length).toBeGreaterThan(1);
@@ -129,10 +160,13 @@ beforeAll(async () => {
   secondCreator = accounts[1];
 
   const wallet = createWalletClient({ account: creator, chain: localChain, transport });
+  // The core factory handles the combinations without Burnable. The burnable one
+  // differs only in which variants it may deploy — its fee arithmetic and its
+  // refusal of non-burnable sets are covered by the contract test suite.
   const hash = await wallet.deployContract({
-    abi: tokenFactoryAbi,
-    bytecode: tokenFactoryBytecode,
-    args: [],
+    abi: factoryDeployAbi.core,
+    bytecode: factoryBytecode.core,
+    args: [BASE_FEE, MINT_FEE, PAUSE_FEE, creator],
   });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   expect(receipt.status).toBe("success");
@@ -262,7 +296,7 @@ describe("on-chain rejection of invalid parameters", () => {
         address: factory,
         abi: tokenFactoryAbi,
         functionName: "createToken",
-        args: ["", "SYM", 18, 1n],
+        args: ["", "SYM", 18, 1n, false, false, false],
         account: creator,
       })
       .then(() => null)
@@ -278,7 +312,7 @@ describe("on-chain rejection of invalid parameters", () => {
         address: factory,
         abi: tokenFactoryAbi,
         functionName: "createToken",
-        args: ["Name", "SYM", 19, 1n],
+        args: ["Name", "SYM", 19, 1n, false, false, false],
         account: creator,
       })
       .then(() => null)
@@ -294,7 +328,7 @@ describe("on-chain rejection of invalid parameters", () => {
         address: factory,
         abi: tokenFactoryAbi,
         functionName: "createToken",
-        args: ["Name", "SYM", 18, 0n],
+        args: ["Name", "SYM", 18, 0n, false, false, false],
         account: creator,
       })
       .then(() => null)
@@ -313,7 +347,7 @@ describe("on-chain rejection of invalid parameters", () => {
         address: factory,
         abi: tokenFactoryAbi,
         functionName: "createToken",
-        args: ["Name", "SYMBOLISTOOLONG", 18, 1n],
+        args: ["Name", "SYMBOLISTOOLONG", 18, 1n, false, false, false],
       })
       .then(() => null)
       .catch(cause => cause);
@@ -334,7 +368,7 @@ describe("on-chain rejection of invalid parameters", () => {
     const data = encodeFunctionData({
       abi: tokenFactoryAbi,
       functionName: "createToken",
-      args: ["Out Of Gas", "OOG", 18, 1n],
+      args: ["Out Of Gas", "OOG", 18, 1n, false, false, false],
     });
 
     let receipt: TransactionReceipt | undefined;
@@ -433,7 +467,10 @@ describe("server-side verification of a recorded creation", () => {
   const envFor = () => ({
     NEXT_PUBLIC_BASE_NETWORK: "sepolia",
     NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL: RPC_URL,
-    NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: factory,
+    // The core factory is the one this suite deploys. Chain verification accepts
+    // either factory's address, since a creation is routed to one or the other
+    // depending on whether Burnable was selected.
+    NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: factory,
   });
 
   it("accepts a real creation and returns the address the factory emitted", async () => {
@@ -471,7 +508,7 @@ describe("server-side verification of a recorded creation", () => {
     const data = encodeFunctionData({
       abi: tokenFactoryAbi,
       functionName: "createToken",
-      args: ["Out Of Gas", "OOG2", 18, 1n],
+      args: ["Out Of Gas", "OOG2", 18, 1n, false, false, false],
     });
 
     let hash: Hex;
@@ -538,9 +575,9 @@ describe("server-side verification of a recorded creation", () => {
     // so the record must not be accepted as verified.
     const wallet = createWalletClient({ account: secondCreator, chain: localChain, transport });
     const deployHash = await wallet.deployContract({
-      abi: tokenFactoryAbi,
-      bytecode: tokenFactoryBytecode,
-      args: [],
+      abi: factoryDeployAbi.core,
+      bytecode: factoryBytecode.core,
+      args: [BASE_FEE, MINT_FEE, PAUSE_FEE, secondCreator],
     });
     const deployReceipt = await publicClient.waitForTransactionReceipt({ hash: deployHash });
     const otherFactory = deployReceipt.contractAddress as Address;
@@ -549,7 +586,7 @@ describe("server-side verification of a recorded creation", () => {
     const outcome = await verifyTokenCreation({
       transactionHash: txHash,
       claimedTokenAddress: token,
-      env: { ...envFor(), NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: otherFactory },
+      env: { ...envFor(), NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: otherFactory },
     });
 
     expect(outcome.outcome).toBe("mismatch");

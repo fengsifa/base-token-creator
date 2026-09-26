@@ -33,6 +33,9 @@ const context: CreationContext = {
   totalSupply: "1000000",
   decimals: 18,
   logoUrl: null,
+  burnable: false,
+  mintable: false,
+  pausable: false,
 };
 
 describe("planRecordWrite", () => {
@@ -163,6 +166,9 @@ describe("contextToPayload", () => {
       total_supply: "1000000",
       decimals: 18,
       logo_url: null,
+      burnable: false,
+      mintable: false,
+      pausable: false,
     });
   });
 

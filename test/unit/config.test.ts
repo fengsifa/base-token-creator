@@ -1,29 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { getAddress, isAddress } from "viem";
-import {
-  MIN_SERVICE_FEE_ETH,
-  feeToWei,
-  normalizeAddress,
-  normalizeFee,
-  resolveConfig,
-} from "../../lib/config";
+import { feeToWei, normalizeAddress, normalizeFee, resolveConfig } from "../../lib/config";
 
 const VALID = "0x1234567890abcdef1234567890abcdef12345678";
 const OTHER = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 
 describe("resolveConfig", () => {
-  it("defaults to Base Sepolia with an unconfigured factory and no false alarms", () => {
+  it("defaults to Base Sepolia with unconfigured factories and no false alarms", () => {
     const config = resolveConfig({});
     expect(config.networkKey).toBe("sepolia");
     expect(config.chainId).toBe(84532);
     expect(config.chainName).toBe("Base Sepolia");
     expect(config.explorerBase).toBe("https://sepolia.basescan.org");
     expect(config.rpcUrl).toBe("https://sepolia.base.org");
-    expect(config.factoryAddress).toBe("");
-    expect(config.feeEth).toBe("0");
-    // A factory that has not been deployed is a state, not a misconfiguration,
-    // so the config reports no issue at all for it.
-    expect(config.factoryAddress).toBe("");
+    expect(config.factoryCoreAddress).toBe("");
+    expect(config.factoryBurnableAddress).toBe("");
+    expect(config.featureFees).toEqual({ base: "0", burnable: "0", mintable: "0", pausable: "0" });
+    // An undeployed factory is a state, not a misconfiguration, so nothing is
+    // reported for it. The page owns that call to action.
     expect(config.issues).toEqual([]);
   });
 
@@ -51,99 +45,156 @@ describe("resolveConfig", () => {
     expect(resolveConfig({ NEXT_PUBLIC_BASE_NETWORK: "polygon" }).networkKey).toBe("sepolia");
   });
 
-  describe("factory address", () => {
-    it("returns the checksummed address", () => {
-      const config = resolveConfig({ NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: VALID });
-      expect(config.factoryAddress.toLowerCase()).toBe(VALID);
-      // The stored form must survive a strict checksum check.
-      expect(isAddress(config.factoryAddress)).toBe(true);
+  // ---------------------------------------------------------------------------
+  // Two factories, because one contract cannot hold all eight feature sets.
+  // ---------------------------------------------------------------------------
+
+  describe("factory addresses", () => {
+    it("resolves each factory independently and checksums both", () => {
+      const config = resolveConfig({
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: VALID,
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_BURNABLE_SEPOLIA: OTHER,
+      });
+      expect(config.factoryCoreAddress.toLowerCase()).toBe(VALID);
+      expect(config.factoryBurnableAddress.toLowerCase()).toBe(OTHER);
+      expect(isAddress(config.factoryCoreAddress)).toBe(true);
+      expect(isAddress(config.factoryBurnableAddress)).toBe(true);
       expect(config.issues).toEqual([]);
     });
 
-    it("accepts an address that is already checksummed", () => {
+    it("accepts an already-checksummed address", () => {
       const checksummed = getAddress(VALID);
       expect(
-        resolveConfig({ NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: checksummed }).factoryAddress,
+        resolveConfig({ NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: checksummed })
+          .factoryCoreAddress,
       ).toBe(checksummed);
     });
 
-    it("ignores a malformed address and says so instead of pretending it works", () => {
-      const config = resolveConfig({ NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: "0xnot-an-address" });
-      expect(config.factoryAddress).toBe("");
-      expect(config.issues.map(issue => issue.message).join(" ")).toMatch(/not a valid EVM address/i);
+    it("keeps the two factories apart", () => {
+      // The burnable one is not a fallback for the core one: they deploy
+      // different contracts, and silently substituting one for the other would
+      // send a creation to a factory that must reject it with
+      // FeatureNotSupportedHere.
+      const onlyBurnable = resolveConfig({
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_BURNABLE_SEPOLIA: OTHER,
+      });
+      expect(onlyBurnable.factoryCoreAddress).toBe("");
+      expect(onlyBurnable.factoryBurnableAddress.toLowerCase()).toBe(OTHER);
+
+      const onlyCore = resolveConfig({
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: VALID,
+      });
+      expect(onlyCore.factoryBurnableAddress).toBe("");
     });
 
-    it("falls back to the unsuffixed variable", () => {
-      const config = resolveConfig({ NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY: VALID });
-      expect(config.factoryAddress).toBeTruthy();
+    it("ignores a malformed address and says which one it was", () => {
+      const config = resolveConfig({
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: "0xnot-an-address",
+      });
+      expect(config.factoryCoreAddress).toBe("");
+      expect(config.issues.map(issue => issue.code)).toEqual(["factory-core-address-invalid"]);
+      expect(config.issues.map(issue => issue.message).join(" ")).toMatch(/CORE_SEPOLIA/);
+    });
+
+    it("falls back to the unsuffixed variable for each factory", () => {
+      const config = resolveConfig({
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE: VALID,
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_BURNABLE: OTHER,
+      });
+      expect(config.factoryCoreAddress.toLowerCase()).toBe(VALID);
+      expect(config.factoryBurnableAddress.toLowerCase()).toBe(OTHER);
     });
 
     it("prefers the network specific variable", () => {
       const config = resolveConfig({
-        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY: VALID,
-        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: OTHER,
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE: VALID,
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: OTHER,
       });
-      expect(config.factoryAddress?.toLowerCase()).toBe(OTHER);
+      expect(config.factoryCoreAddress?.toLowerCase()).toBe(OTHER);
     });
 
-    it("does not reuse the sepolia factory on mainnet", () => {
+    it("does not reuse a sepolia factory on mainnet", () => {
       const config = resolveConfig({
         NEXT_PUBLIC_BASE_NETWORK: "mainnet",
-        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: VALID,
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: VALID,
+        NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_BURNABLE_SEPOLIA: OTHER,
       });
-      expect(config.factoryAddress).toBe("");
+      expect(config.factoryCoreAddress).toBe("");
+      expect(config.factoryBurnableAddress).toBe("");
     });
   });
 
-  describe("service fee", () => {
-    it("defaults to free mode", () => {
+  // ---------------------------------------------------------------------------
+  // The price table
+  // ---------------------------------------------------------------------------
+
+  describe("feature fees", () => {
+    it("defaults every component to zero", () => {
       const config = resolveConfig({});
-      expect(config.feeEth).toBe("0");
-      expect(feeToWei(config.feeEth)).toBe(0n);
+      expect(config.featureFees.base).toBe("0");
+      expect(config.featureFees.burnable).toBe("0");
+      expect(config.featureFees.mintable).toBe("0");
+      expect(config.featureFees.pausable).toBe("0");
     });
 
-    it("keeps a fee at or above the minimum", () => {
+    it("keeps the 0.000001 ETH test price exactly — there is no minimum floor", () => {
+      // An earlier revision raised any non-zero fee below 0.0001 ETH up to that
+      // value, on the grounds that dust is economically pointless. The product
+      // now prices features at 0.000001 during its test phase, and a floor would
+      // silently rewrite the operator's own price table, leaving the page showing
+      // one number while the factory demanded another. This test exists so that
+      // behaviour cannot come back unnoticed.
       const config = resolveConfig({
-        NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: MIN_SERVICE_FEE_ETH,
+        NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: "0.000001",
+        NEXT_PUBLIC_BURNABLE_FEE_SEPOLIA: "0.000001",
+        NEXT_PUBLIC_MINTABLE_FEE_SEPOLIA: "0.000001",
+        NEXT_PUBLIC_PAUSABLE_FEE_SEPOLIA: "0.000001",
         NEXT_PUBLIC_TOKEN_CREATOR_FEE_RECIPIENT_SEPOLIA: VALID,
       });
-      expect(config.feeEth).toBe(MIN_SERVICE_FEE_ETH);
-      expect(feeToWei(config.feeEth)).toBe(100_000_000_000_000n);
-      // No fee-related complaint: the fee and its recipient are both configured.
-      expect(config.issues.map(issue => issue.message).join(" ")).not.toMatch(/below the|not a valid ETH amount|fee recipient/i);
+
+      expect(config.featureFees).toEqual({
+        base: "0.000001",
+        burnable: "0.000001",
+        mintable: "0.000001",
+        pausable: "0.000001",
+      });
+      expect(feeToWei(config.featureFees.base)).toBe(1_000_000_000_000n);
+      // No complaint of any kind: the prices are valid and the recipient is set.
+      expect(config.issues).toEqual([]);
     });
 
-    it("raises a dust fee to the minimum", () => {
+    it("reads each feature price from its own variable", () => {
       const config = resolveConfig({
-        NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: "0.0000001",
-        NEXT_PUBLIC_TOKEN_CREATOR_FEE_RECIPIENT_SEPOLIA: VALID,
+        NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: "0.000001",
+        NEXT_PUBLIC_BURNABLE_FEE_SEPOLIA: "0.002",
+        NEXT_PUBLIC_MINTABLE_FEE_SEPOLIA: "0.003",
+        NEXT_PUBLIC_PAUSABLE_FEE_SEPOLIA: "0.004",
       });
-      expect(config.feeEth).toBe(MIN_SERVICE_FEE_ETH);
-      expect(config.issues.map(issue => issue.message).join(" ")).toMatch(/below the .* minimum/i);
+      expect(config.featureFees.burnable).toBe("0.002");
+      expect(config.featureFees.mintable).toBe("0.003");
+      expect(config.featureFees.pausable).toBe("0.004");
+    });
+
+    it("degrades an unparseable price to zero and tags the issue", () => {
+      const config = resolveConfig({ NEXT_PUBLIC_BURNABLE_FEE_SEPOLIA: "abc" });
+      expect(config.featureFees.burnable).toBe("0");
+      expect(config.issues.map(issue => issue.code)).toContain("fee-invalid");
+      expect(config.issues.map(issue => issue.message).join(" ")).toMatch(/BURNABLE_FEE_SEPOLIA/);
     });
 
     it("does not raise an explicit zero", () => {
       const config = resolveConfig({ NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: "0" });
-      expect(config.feeEth).toBe("0");
-      expect(config.issues.map(issue => issue.message).join(" ")).not.toMatch(/below the/i);
+      expect(config.featureFees.base).toBe("0");
+      expect(config.issues).toEqual([]);
     });
 
-    it("degrades an unparseable fee to zero", () => {
-      const config = resolveConfig({ NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: "abc" });
-      expect(config.feeEth).toBe("0");
-      expect(config.issues.map(issue => issue.message).join(" ")).toMatch(/not a valid ETH amount/i);
+    it("flags any non-zero price that has no recipient", () => {
+      const config = resolveConfig({ NEXT_PUBLIC_PAUSABLE_FEE_SEPOLIA: "0.000001" });
+      expect(config.issues.map(issue => issue.code)).toContain("fee-recipient-missing");
     });
 
-    it("flags a non-zero fee that has no recipient", () => {
-      const config = resolveConfig({
-        NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: MIN_SERVICE_FEE_ETH,
-      });
-      expect(config.issues.map(issue => issue.message).join(" ")).toMatch(/no valid fee recipient/i);
-    });
-
-    it("does not flag a missing recipient in free mode", () => {
-      const config = resolveConfig({});
-      expect(config.issues.map(issue => issue.message).join(" ")).not.toMatch(/fee recipient/i);
+    it("does not flag a missing recipient when everything is free", () => {
+      expect(resolveConfig({}).issues).toEqual([]);
     });
 
     it("ignores an invalid recipient and says so", () => {
@@ -151,7 +202,16 @@ describe("resolveConfig", () => {
         NEXT_PUBLIC_TOKEN_CREATOR_FEE_RECIPIENT_SEPOLIA: "0x1234",
       });
       expect(config.feeRecipient).toBe("");
-      expect(config.issues.map(issue => issue.message).join(" ")).toMatch(/not a valid EVM address/i);
+      expect(config.issues.map(issue => issue.code)).toContain("fee-recipient-invalid");
+    });
+
+    it("keeps the fee recipient checksummed for display", () => {
+      const config = resolveConfig({
+        NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: "0.000001",
+        NEXT_PUBLIC_TOKEN_CREATOR_FEE_RECIPIENT_SEPOLIA: VALID,
+      });
+      expect(config.feeRecipient).toBe(getAddress(VALID));
+      expect(config.issues.map(issue => issue.code)).not.toContain("fee-recipient-missing");
     });
   });
 
@@ -180,51 +240,20 @@ describe("resolveConfig", () => {
 
   it("never reports a missing factory as a configuration issue", () => {
     // Guards the fix for a duplicated notice: the creator page shows its own,
-    // actionable call to action for this, and a generic issue would be rendered
-    // a second time — in the page AND in the serialised client payload.
+    // actionable call to action for this, and a generic issue would be rendered a
+    // second time — in the page AND in the serialised client payload.
     const missing = resolveConfig({});
-    expect(missing.factoryAddress).toBe("");
+    expect(missing.factoryCoreAddress).toBe("");
+    expect(missing.factoryBurnableAddress).toBe("");
     expect(missing.issues).toEqual([]);
 
-    const configured = resolveConfig({ NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: VALID });
-    expect(configured.factoryAddress).toBeTruthy();
-    expect(configured.issues).toEqual([]);
-  });
-
-  it("still reports an address that was supplied but is malformed", () => {
-    const config = resolveConfig({ NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_SEPOLIA: "0xnope" });
-    expect(config.issues.map(issue => issue.code)).toEqual(["factory-address-invalid"]);
-  });
-
-  it("tags the fee issues with distinct codes", () => {
-    expect(
-      resolveConfig({ NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: "abc" }).issues.map(i => i.code),
-    ).toContain("fee-invalid");
-
-    expect(
-      resolveConfig({ NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: "0.0000001" }).issues.map(i => i.code),
-    ).toContain("fee-below-minimum");
-
-    expect(
-      resolveConfig({ NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: MIN_SERVICE_FEE_ETH }).issues.map(
-        i => i.code,
-      ),
-    ).toContain("fee-recipient-missing");
-
-    expect(
-      resolveConfig({ NEXT_PUBLIC_TOKEN_CREATOR_FEE_RECIPIENT_SEPOLIA: "0x1234" }).issues.map(
-        i => i.code,
-      ),
-    ).toContain("fee-recipient-invalid");
-  });
-
-  it("keeps the fee recipient checksummed for display", () => {
-    const config = resolveConfig({
-      NEXT_PUBLIC_TOKEN_CREATOR_FEE_SEPOLIA: MIN_SERVICE_FEE_ETH,
-      NEXT_PUBLIC_TOKEN_CREATOR_FEE_RECIPIENT_SEPOLIA: VALID,
+    const configured = resolveConfig({
+      NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_CORE_SEPOLIA: VALID,
+      NEXT_PUBLIC_TOKEN_CONTRACT_FACTORY_BURNABLE_SEPOLIA: OTHER,
     });
-    expect(config.feeRecipient).toBe(getAddress(VALID));
-    expect(config.issues.map(issue => issue.code)).not.toContain("fee-recipient-missing");
+    expect(configured.factoryCoreAddress).toBeTruthy();
+    expect(configured.factoryBurnableAddress).toBeTruthy();
+    expect(configured.issues).toEqual([]);
   });
 
   it("never copies unrelated environment variables into the config", () => {
@@ -258,9 +287,10 @@ describe("normalizeFee", () => {
     expect(normalizeFee("   ")).toEqual({ feeEth: "0", valid: true });
   });
 
-  it("accepts plain and fractional amounts", () => {
+  it("accepts plain and fractional amounts, including the test price", () => {
     expect(normalizeFee("0")).toEqual({ feeEth: "0", valid: true });
     expect(normalizeFee("0.001")).toEqual({ feeEth: "0.001", valid: true });
+    expect(normalizeFee("0.000001")).toEqual({ feeEth: "0.000001", valid: true });
   });
 
   it("rejects anything else", () => {

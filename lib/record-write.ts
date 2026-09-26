@@ -37,6 +37,17 @@ export type CreationContext = {
   totalSupply: string;
   decimals: number;
   logoUrl?: string | null;
+  /**
+   * Which optional features the token was created with.
+   *
+   * Part of the creation context rather than a later update because they describe
+   * what was bought, not how the attempt went. They are recorded only: the backend
+   * can neither enable nor disable a feature — the deployed contract is the sole
+   * authority on what a token can do.
+   */
+  burnable: boolean;
+  mintable: boolean;
+  pausable: boolean;
 };
 
 /** Fields a later write may add or change. */
@@ -106,6 +117,15 @@ export function checkCreationContext(context: Partial<CreationContext>): string[
     problems.push("Decimals must be a whole number between 0 and 18.");
   }
 
+  // The feature flags are part of the creation context, so a POST must carry
+  // them. A record missing them would misdescribe what exists on chain, which is
+  // worse than declining to write it.
+  for (const key of ["burnable", "mintable", "pausable"] as const) {
+    if (typeof context[key] !== "boolean") {
+      problems.push(`The feature flag "${key}" is missing from the creation context.`);
+    }
+  }
+
   return problems;
 }
 
@@ -119,6 +139,9 @@ export function contextToPayload(context: CreationContext): Record<string, unkno
     total_supply: context.totalSupply.trim(),
     decimals: context.decimals,
     logo_url: context.logoUrl ?? null,
+    burnable: context.burnable,
+    mintable: context.mintable,
+    pausable: context.pausable,
   };
 }
 
