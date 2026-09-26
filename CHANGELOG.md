@@ -1,5 +1,32 @@
 # Changelog
 
+## 6.0.0
+
+**This release contains no change to the code.** It exists to give a name to the code
+that is already serving the live site.
+
+The deployed build is the commit that added token records (`74ff86b`), and every file
+under `app/`, `lib/`, `components/`, `contracts/` and `public/` in this release is
+identical to that commit. The only differences from 5.0.0 are this file and the
+`version` field in `package.json` and `package-lock.json`. No server was touched.
+
+Why a new version number rather than a tag on that older commit: the live code sits
+*between* 4.0.0 and 5.0.0 in the history and carries no tag of its own, so until now
+there was no name for "what is actually deployed". Tagging it in place would have put
+6.0.0 behind 5.0.0 and made every subsequent diff read backwards. 6.0.0 therefore
+continues from 5.0.0 — whose runtime source is already identical to the live code —
+and moves nothing but the version number.
+
+**Further changes are made against this revision.** The known issues recorded under
+5.0.0 still stand; the `-32002` connection-request loop in particular is still
+unaddressed, and is the next thing to fix on top of this baseline.
+
+### Verification
+
+`git diff --stat 74ff86b HEAD -- app lib components contracts public` is empty, which
+is the entire claim of this release: the runtime source here is exactly what the live
+site serves.
+
 ## 5.0.0
 
 Every token creation is now recorded and the operator can look it up. The on-chain
